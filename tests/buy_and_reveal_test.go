@@ -22,9 +22,9 @@ import (
 // ──────────────────────────────────────────────────────────────────────────────
 
 const (
-	buyPackMasterID = "69bd3fc8f030ad91a0caa41b"
-	buyQuantity     = 25
-	enableReveal    = false
+	buyPackMasterID = "69c378ce93725fbf11f5c183"
+	buyQuantity     = 10
+	enableReveal    = true
 
 	// usersFile lists all test accounts: [{ "email": "...", "otp": "..." }, …]
 	usersFile = "users.json"

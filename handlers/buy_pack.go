@@ -3,29 +3,10 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/go-resty/resty/v2"
 )
-
-// -------- TYPES --------
-
-// UserCred holds one test account's credentials.
-type UserCred struct {
-	Email string `json:"email"`
-	OTP   string `json:"otp"`
-}
-
-// UserToken holds the generated token for a user.
-type UserToken struct {
-	Email       string
-	AccessToken string
-	SSOToken    string
-	Err         error
-}
 
 // BuyPackRequest is the payload for buying a pack.
 type BuyPackRequest struct {
@@ -91,50 +72,6 @@ type revealDataShape struct {
 		Value      float64 `json:"value"`
 		Price      float64 `json:"price"`
 	} `json:"cards"`
-}
-
-// -------- AUTH ========
-
-func LoadUsers(path string) ([]UserCred, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var users []UserCred
-	if err := json.Unmarshal(b, &users); err != nil {
-		return nil, err
-	}
-	return users, nil
-}
-
-// GenerateAllTokens calls the original GenerateTokens via temporary files due to earlier architecture.
-func GenerateAllTokens(fcBFFURL string, users []UserCred) []UserToken {
-	tokens := make([]UserToken, len(users))
-	var wg sync.WaitGroup
-
-	for i, u := range users {
-		wg.Add(1)
-		go func(idx int, cred UserCred) {
-			defer wg.Done()
-			
-			// Hack: Write a temp file for GenerateTokens to read
-			tmpDir := os.TempDir()
-			tmpFile := filepath.Join(tmpDir, fmt.Sprintf("user_%d.json", time.Now().UnixNano()+int64(idx)))
-			b, _ := json.Marshal(cred)
-			os.WriteFile(tmpFile, b, 0644)
-			defer os.Remove(tmpFile)
-
-			at, st, err := GenerateTokens(fcBFFURL, tmpFile)
-			tokens[idx] = UserToken{
-				Email:       cred.Email,
-				AccessToken: at,
-				SSOToken:    st,
-				Err:         err,
-			}
-		}(i, u)
-	}
-	wg.Wait()
-	return tokens
 }
 
 // -------- BUY & REVEAL ========

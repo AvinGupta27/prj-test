@@ -1,17 +1,19 @@
 package tests
 
 import (
+	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/AvinGupta27/code-go-automation/config"
-	"github.com/AvinGupta27/code-go-automation/handlers" 
+	"github.com/AvinGupta27/code-go-automation/handlers"
 	"github.com/AvinGupta27/code-go-automation/reporter"
 )
 
-// Workers is the number of concurrent goroutines making reveal API calls.
+// Workers is the number of concurrent goroutines making reveal API calls per user.
 const Workers = 5
 
 // -------- STRUCTS --------
@@ -19,6 +21,7 @@ const Workers = 5
 // result holds the raw outcome of a single reveal call (internal to test).
 type result struct {
 	id        string
+	email     string
 	success   bool
 	status    int
 	latencyMs int64
@@ -34,50 +37,84 @@ func TestRevealAPI(t *testing.T) {
 		t.Fatalf("config load error: %v", err)
 	}
 
-	token, _, err := handlers.GenerateTokens(cfg.FcBFFURL, config.DataPath("user.json"))
+	// Load all test user accounts from users.json.
+	users, err := handlers.LoadUsers(config.DataPath("users.json"))
 	if err != nil {
-		t.Fatalf("token generation failed: %v", err)
+		t.Fatalf("failed to load users from users.json: %v", err)
 	}
-
-	// Fetch all unrevealed pack IDs from the live API — no ids.json needed.
-	ids, err := handlers.FetchUnrevealedPackIDs(cfg.SpinnerBFFURL, token)
-	if err != nil {
-		t.Fatalf("failed fetching unrevealed pack IDs: %v", err)
+	if len(users) == 0 {
+		t.Fatal("users.json is empty — add at least one account")
 	}
+	t.Logf("Loaded %d user account(s)", len(users))
 
-	totalIDs := len(ids)
-	if totalIDs == 0 {
-		t.Skip("No unrevealed packs found for the current user. Skip.")
+	// Authenticate all users in parallel.
+	t.Log("Authenticating all users in parallel …")
+	tokens := handlers.GenerateAllTokens(cfg.FcBFFURL, users)
+
+	// Partition tokens into valid / failed.
+	var validTokens []handlers.UserToken
+	for _, tok := range tokens {
+		if tok.Err != nil {
+			t.Errorf("Auth FAILED for %s: %v", tok.Email, tok.Err)
+		} else {
+			validTokens = append(validTokens, tok)
+			t.Logf("Auth OK for %s", tok.Email)
+		}
+	}
+	if len(validTokens) == 0 {
+		t.Fatal("all authentications failed — cannot proceed")
 	}
 
 	t.Logf("Environment: %s", cfg.Env)
 	t.Logf("Spinner BFF: %s", cfg.SpinnerBFFURL)
-	t.Logf("Found %d unrevealed pack(s)", totalIDs)
-	t.Logf("Using worker pool size: %d", Workers)
+	t.Logf("Using worker pool size per user: %d", Workers)
 
-	// We pass the total ID count and the constant pool size.
-	// We'll give it a readable name for the report's endpoint field.
 	rep := reporter.New(cfg.Env, "Reveal Packs API", Workers)
 	outDir := filepath.Join(config.Root(), "reports")
 
-	results := make(chan result, totalIDs)
-	jobs := make(chan string, totalIDs)
-
-	var wg sync.WaitGroup
 	startTime := time.Now()
 
-	// Launch generic worker pool
+	// Collect all reveal jobs across all users.
+	type revealJob struct {
+		token handlers.UserToken
+		id    string
+	}
+
+	// First, fetch unrevealed pack IDs for every authenticated user.
+	var allJobs []revealJob
+	for _, tok := range validTokens {
+		ids, err := handlers.FetchUnrevealedPackIDs(cfg.SpinnerBFFURL, tok.AccessToken)
+		if err != nil {
+			t.Errorf("failed fetching unrevealed packs for %s: %v", tok.Email, err)
+			continue
+		}
+		t.Logf("Found %d unrevealed pack(s) for %s", len(ids), tok.Email)
+		for _, id := range ids {
+			allJobs = append(allJobs, revealJob{token: tok, id: id})
+		}
+	}
+
+	if len(allJobs) == 0 {
+		t.Skip("No unrevealed packs found for any user. Skip.")
+	}
+
+	t.Logf("Total unrevealed packs across all users: %d", len(allJobs))
+
+	results := make(chan result, len(allJobs))
+	jobs := make(chan revealJob, len(allJobs))
+
+	var wg sync.WaitGroup
+
+	// Launch generic worker pool.
 	for w := 1; w <= Workers; w++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			for id := range jobs {
-				// We don't have the user's email easily available here without parsing the JSON again,
-				// but that's fine since RevealPack just uses it for reporting. We can pass a dummy string
-				// since the old pack_reveal_test didn't need user emails in its simple report.
-				rr := handlers.RevealPack(cfg.SpinnerBFFURL, token, id, "user.json")
+			for job := range jobs {
+				rr := handlers.RevealPack(cfg.SpinnerBFFURL, job.token.AccessToken, job.id, job.token.Email)
 				results <- result{
-					id:        id,
+					id:        job.id,
+					email:     job.token.Email,
 					success:   rr.Success,
 					status:    rr.Status,
 					latencyMs: rr.LatencyMs,
@@ -87,8 +124,8 @@ func TestRevealAPI(t *testing.T) {
 		}(w)
 	}
 
-	for _, id := range ids {
-		jobs <- id
+	for _, job := range allJobs {
+		jobs <- job
 	}
 	close(jobs)
 
@@ -99,6 +136,7 @@ func TestRevealAPI(t *testing.T) {
 	}()
 
 	var passCount, failCount int
+	userErrors := make(map[string][]string)
 
 	for res := range results {
 		row := reporter.TestResult{
@@ -112,10 +150,13 @@ func TestRevealAPI(t *testing.T) {
 
 		if !res.success {
 			failCount++
-			t.Errorf("FAIL | ID=%-30s | Status=%d | Error=%s", res.id, res.status, res.errorMsg)
+			userErrors[res.email] = append(userErrors[res.email], fmt.Sprintf("[%s] %s", res.id, res.errorMsg))
+			t.Errorf("FAIL | User=%-30s | ID=%-30s | Status=%d | Error=%s",
+				res.email, res.id, res.status, res.errorMsg)
 		} else {
 			passCount++
-			t.Logf("OK   | ID=%-30s | Status=%d | %dms", res.id, res.status, res.latencyMs)
+			t.Logf("OK   | User=%-30s | ID=%-30s | Status=%d | %dms",
+				res.email, res.id, res.status, res.latencyMs)
 		}
 	}
 
@@ -126,17 +167,26 @@ func TestRevealAPI(t *testing.T) {
 	if err != nil {
 		t.Logf("could not write JSON report: %v", err)
 	} else {
-		t.Logf("📄 JSON report: %s", jsonPath)
+		t.Logf("JSON report: %s", jsonPath)
 	}
 
 	htmlPath, err := rep.WriteHTML(outDir)
 	if err != nil {
 		t.Logf("could not write HTML report: %v", err)
 	} else {
-		t.Logf("🌐 HTML report: %s", htmlPath)
+		t.Logf("HTML report: %s", htmlPath)
+	}
+
+	// Per-user failure summary.
+	if len(userErrors) > 0 {
+		t.Logf("────────────── PER-USER FAILURES ──────────────")
+		for email, errs := range userErrors {
+			t.Logf("User: %s | Failures: %s", email, strings.Join(errs, " | "))
+		}
 	}
 
 	t.Logf("────────────── TEST SUMMARY ──────────────")
+	t.Logf("Total users:    %d", len(validTokens))
 	t.Logf("Total items:    %d", rep.Summary.TotalRequests)
 	t.Logf("Success:        %d", rep.Summary.SuccessCount)
 	t.Logf("Failed:         %d", rep.Summary.FailureCount)
