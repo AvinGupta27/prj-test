@@ -15,6 +15,7 @@ type Config struct {
 	SpinnerBFFURL string // Base URL for Spinner BFF (pack reveals, etc.)
 	FcBFFURL      string // Base URL for FC BFF (auth, etc.)
 	FrontendURL   string
+	ProxyURL      string // Base URL for the proxy service (supply, etc.)
 }
 
 // projectRoot returns the absolute path of the project root by walking up from
@@ -50,6 +51,7 @@ func Load() (*Config, error) {
 		SpinnerBFFURL: fmt.Sprintf(os.Getenv("SPINNER_BFF_BASE_URL"), env),
 		FcBFFURL:      fmt.Sprintf(os.Getenv("FC_BFF_BASE_URL"), env),
 		FrontendURL:   fmt.Sprintf(os.Getenv("FRONTEND_BASE_URL"), env),
+		ProxyURL:      fmt.Sprintf(os.Getenv("PROXY_URL"), env),
 	}
 
 	return cfg, nil

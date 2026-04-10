@@ -14,3 +14,13 @@ const (
 	AuthOTPVerify   = "/auth/otp/verify"
 	AuthSSOGenerate = "/auth/sso/generate"
 )
+
+// -------- Spinner BFF Endpoints (continued) --------
+const (
+	EventGroupsFindAll = "/api/v1/eventGroups/findAll"
+)
+
+// -------- Proxy Endpoints --------
+const (
+	EventGroupsSupply = "/superteamUserService/api/v1/events/available-supply"
+)

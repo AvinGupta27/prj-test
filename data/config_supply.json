@@ -1,0 +1,8 @@
+{
+  "_comment": "Supply integrity test config. Edit values here — no code change or commit needed.",
+
+  "eventGroupsPage":  1,
+  "eventGroupsLimit": 200,
+
+  "tolerancePercent": 0.00
+}
