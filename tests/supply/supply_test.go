@@ -1,4 +1,4 @@
-package tests
+package supply_test
 
 import (
 	"fmt"
@@ -9,6 +9,7 @@ import (
 	"github.com/AvinGupta27/code-go-automation/handlers"
 	"github.com/AvinGupta27/code-go-automation/reporter"
 	"github.com/AvinGupta27/code-go-automation/testconfig"
+	"github.com/AvinGupta27/code-go-automation/testutil"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -84,7 +85,7 @@ func (r supplyRow) RowDetails() []reporter.Detail {
 // ──────────────────────────────────────────────────────────────────────────────
 
 type SupplySuite struct {
-	BaseSuite
+	testutil.BaseSuite
 	cfg supplyConfig
 
 	// Shared outputs for downstream dependent tests.
@@ -93,7 +94,7 @@ type SupplySuite struct {
 }
 
 func TestSupplySuite(t *testing.T) {
-	RunSuite(t, new(SupplySuite))
+	testutil.Run(t, new(SupplySuite))
 }
 
 func (s *SupplySuite) SetupSuite() {
@@ -122,7 +123,6 @@ func (s *SupplySuite) TestSupplyIntegrity() {
 	token, err := s.getToken()
 	s.Require().NoError(err)
 
-	// Step 1 — fetch event groups.
 	s.T().Logf("Fetching event groups (page=%d limit=%d) …", s.cfg.EventGroupsPage, s.cfg.EventGroupsLimit)
 	groups, err := handlers.FetchEventGroups(cfg.SpinnerBFFURL, token, s.cfg.EventGroupsPage, s.cfg.EventGroupsLimit)
 	s.Require().NoError(err, "FetchEventGroups failed")
@@ -138,14 +138,12 @@ func (s *SupplySuite) TestSupplyIntegrity() {
 		slugByID[g.ID] = g.Slug
 	}
 
-	// Step 2 — fetch supply breakdowns.
 	s.T().Logf("Fetching supply breakdowns for %d event group(s) …", len(ids))
 	breakdowns, err := handlers.FetchSupplyBreakdowns(cfg.ProxyURL, ids)
 	s.Require().NoError(err, "FetchSupplyBreakdowns failed")
 	s.Require().NotEmpty(breakdowns, "no supply data returned")
 	s.Breakdowns = breakdowns
 
-	// Step 3 — assert invariant.
 	s.T().Logf("Asserting supply integrity (tolerance=%.2f%%) …", s.cfg.TolerancePercent*100)
 	var failCount int
 
@@ -156,7 +154,7 @@ func (s *SupplySuite) TestSupplyIntegrity() {
 		overagePct := safePercent(overage, b.MaxSupply)
 		pass := total <= allowedMax
 
-		row := supplyRow{
+		run.Add(supplyRow{
 			EventGroupID:    b.EventGroupID,
 			Slug:            slugByID[b.EventGroupID],
 			MaxSupply:       b.MaxSupply,
@@ -169,8 +167,7 @@ func (s *SupplySuite) TestSupplyIntegrity() {
 			Overage:         overage,
 			OveragePct:      overagePct,
 			Pass:            pass,
-		}
-		run.Add(row)
+		})
 
 		if !pass {
 			failCount++
@@ -183,9 +180,9 @@ func (s *SupplySuite) TestSupplyIntegrity() {
 	}
 
 	rep := run.Finish()
-	s.writeReport(rep, reportDir())
-	s.storeSuiteReport(rep)
-	s.logSummary(rep)
+	s.WriteReport(rep)
+	s.StoreSuiteReport(rep)
+	s.LogSummary(rep)
 
 	if failCount > 0 {
 		s.Fail(fmt.Sprintf("%d supply integrity violation(s)", failCount))
@@ -206,24 +203,6 @@ func (s *SupplySuite) getToken() (string, error) {
 		return "", fmt.Errorf("getToken: auth failed for %s: %w", users[0].Email, err)
 	}
 	return auth.AccessToken, nil
-}
-
-func (s *SupplySuite) writeReport(rep *reporter.Report, outDir string) {
-	jsonPath, err := reporter.WriteJSON(rep, outDir)
-	if err != nil {
-		s.T().Logf("report write error: %v", err)
-		return
-	}
-	s.T().Logf("JSON report: %s", jsonPath)
-}
-
-func (s *SupplySuite) logSummary(rep *reporter.Report) {
-	sm := rep.Summary
-	s.T().Logf("────────── %s SUMMARY ──────────", rep.Name)
-	s.T().Logf("Total: %d  Pass: %d  Fail: %d", sm.Total, sm.PassCount, sm.FailCount)
-	s.T().Logf("Success rate: %.1f%%", sm.SuccessRate)
-	s.T().Logf("Wall time: %d ms", sm.WallTimeMs)
-	s.T().Logf("────────────────────────────────────────")
 }
 
 func safePercent(part, total float64) float64 {

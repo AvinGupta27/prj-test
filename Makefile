@@ -20,15 +20,18 @@
 
 ## reveal: Reveal all unrevealed packs for every user in users.json
 reveal:
-	go test ./tests/... -v -run TestPackSuite/TestReveal -count=1
+	go test ./tests/pack/... -v -run TestPackSuite/TestReveal -count=1
 
 ## buy-reveal: Buy packs then reveal them for every user in users.json
 buy-reveal:
-	go test ./tests/... -v -run TestPackSuite/TestBuyAndReveal -count=1
+	go test ./tests/pack/... -v -run TestPackSuite/TestBuyAndReveal -count=1
+
+packs:
+	go test ./tests/pack/... -v -run TestPackSuite -count=1
 
 ## supply: Assert supply integrity — total allocations must not exceed maxSupply
 supply:
-	go test ./tests/... -v -run TestSupplySuite/TestSupplyIntegrity -count=1
+	go test ./tests/supply/... -v -run TestSupplySuite/TestSupplyIntegrity -count=1
 
 clean-reports:
 	rm -rf reports/*

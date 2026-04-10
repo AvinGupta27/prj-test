@@ -1,4 +1,4 @@
-package tests
+package pack_test
 
 import (
 	"fmt"
@@ -10,26 +10,26 @@ import (
 	"github.com/AvinGupta27/code-go-automation/config"
 	"github.com/AvinGupta27/code-go-automation/handlers"
 	"github.com/AvinGupta27/code-go-automation/reporter"
+	"github.com/AvinGupta27/code-go-automation/testconfig"
+	"github.com/AvinGupta27/code-go-automation/testutil"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
-// CONFIGURATION
+// CONFIGURATION — edit data/config_buy_reveal.json, no code change needed
 // ──────────────────────────────────────────────────────────────────────────────
 
-const (
-	revealWorkers   = 10
-	buyPackMasterID = "69ce3ade5f131ce16676c7b7"
-	buyQuantity     = 2
-	enableReveal    = false
-	usersFile       = "users.json"
-)
+type packConfig struct {
+	PackMasterID  string `json:"packMasterID"`
+	Quantity      int    `json:"quantity"`
+	EnableReveal  bool   `json:"enableReveal"`
+	RevealWorkers int    `json:"revealWorkers"`
+	UsersFile     string `json:"usersFile"`
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // ROW TYPES
-// Each implements reporter.Row — no other reporting code needed in this file.
 // ──────────────────────────────────────────────────────────────────────────────
 
-// revealRow is the result of one reveal API call.
 type revealRow struct {
 	PackID     string
 	Email      string
@@ -53,11 +53,8 @@ func (r revealRow) RowColumns() []reporter.Column {
 		{Header: "Latency", Value: fmt.Sprintf("%d ms", r.Dur.Milliseconds())},
 	}
 }
-func (r revealRow) RowDetails() []reporter.Detail {
-	return r.Failure.ToDetails()
-}
+func (r revealRow) RowDetails() []reporter.Detail { return r.Failure.ToDetails() }
 
-// buyRevealRow is the result of one user's full buy + reveal flow.
 type buyRevealRow struct {
 	Email             string
 	PackIDs           []string
@@ -68,14 +65,13 @@ type buyRevealRow struct {
 	RevDur            time.Duration
 	BuyFailure        reporter.FailureDetail
 	RevFailures       []reporter.FailureDetail
-	// Wallet fields
-	WalletSkipped     bool    // true if skipped due to insufficient balance
+	WalletSkipped     bool
 	PriceCurrency     string
-	ExpectedDeduction float64 // price × quantity
-	WalletBefore      float64 // unlocked balance before buy
-	WalletAfter       float64 // unlocked balance after buy
-	ActualDeduction   float64 // WalletBefore - WalletAfter
-	WalletCheckOK     bool    // true if actual deduction matches expected
+	ExpectedDeduction float64
+	WalletBefore      float64
+	WalletAfter       float64
+	ActualDeduction   float64
+	WalletCheckOK     bool
 }
 
 func (r buyRevealRow) RowStatus() reporter.Status {
@@ -90,7 +86,7 @@ func (r buyRevealRow) RowStatus() reporter.Status {
 			return reporter.StatusFail
 		}
 	}
-	if !r.WalletCheckOK {
+	if r.WalletBefore > 0 && !r.WalletCheckOK {
 		return reporter.StatusWarning
 	}
 	return reporter.StatusPass
@@ -118,13 +114,10 @@ func (r buyRevealRow) RowColumns() []reporter.Column {
 }
 func (r buyRevealRow) RowDetails() []reporter.Detail {
 	var d []reporter.Detail
-
 	if r.WalletSkipped {
 		d = append(d, reporter.Detail{Key: "Skip Reason", Value: fmt.Sprintf("Insufficient %s balance (%.4f < %.4f required)", r.PriceCurrency, r.WalletBefore, r.ExpectedDeduction)})
 		return d
 	}
-
-	// Wallet section — always shown when wallet data is available.
 	if r.PriceCurrency != "" {
 		d = append(d,
 			reporter.Detail{Key: "Currency", Value: r.PriceCurrency},
@@ -135,7 +128,6 @@ func (r buyRevealRow) RowDetails() []reporter.Detail {
 			reporter.Detail{Key: "Wallet Check", Value: map[bool]string{true: "PASS", false: "FAIL — deduction mismatch"}[r.WalletCheckOK]},
 		)
 	}
-
 	if len(r.PackIDs) > 0 {
 		d = append(d, reporter.Detail{Key: "Pack IDs", Value: strings.Join(r.PackIDs, ", "), Mono: true})
 	}
@@ -151,16 +143,22 @@ func (r buyRevealRow) RowDetails() []reporter.Detail {
 // ──────────────────────────────────────────────────────────────────────────────
 
 type PackSuite struct {
-	BaseSuite
+	testutil.BaseSuite
+	cfg         packConfig
 	validTokens []handlers.UserToken
 }
 
 func (s *PackSuite) SetupSuite() {
 	s.BaseSuite.SetupSuite()
 
-	users, err := handlers.LoadUsers(config.DataPath(usersFile))
-	s.Require().NoError(err, "failed to load users from %s", usersFile)
-	s.Require().NotEmpty(users, "%s is empty", usersFile)
+	err := testconfig.Load(config.DataPath("config_buy_reveal.json"), &s.cfg)
+	s.Require().NoError(err, "failed to load config_buy_reveal.json")
+	s.T().Logf("Pack config: packID=%s  qty=%d  reveal=%v  workers=%d",
+		s.cfg.PackMasterID, s.cfg.Quantity, s.cfg.EnableReveal, s.cfg.RevealWorkers)
+
+	users, err := handlers.LoadUsers(config.DataPath(s.cfg.UsersFile))
+	s.Require().NoError(err, "failed to load users from %s", s.cfg.UsersFile)
+	s.Require().NotEmpty(users, "%s is empty", s.cfg.UsersFile)
 	s.T().Logf("Loaded %d user account(s)", len(users))
 
 	s.T().Log("Authenticating all users in parallel …")
@@ -177,7 +175,7 @@ func (s *PackSuite) SetupSuite() {
 }
 
 func TestPackSuite(t *testing.T) {
-	RunSuite(t, new(PackSuite))
+	testutil.Run(t, new(PackSuite))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -186,7 +184,6 @@ func TestPackSuite(t *testing.T) {
 
 func (s *PackSuite) TestReveal() {
 	cfg := s.Cfg
-	outDir := reportDir()
 
 	run := reporter.NewRunner[revealRow]("Reveal Packs", reporter.NewMeta(
 		cfg.Env, cfg.SpinnerBFFURL, "",
@@ -194,7 +191,6 @@ func (s *PackSuite) TestReveal() {
 	))
 	run.Annotate("users_authed", fmt.Sprintf("%d", len(s.validTokens)))
 
-	// Collect all (token, packID) jobs across every user.
 	type job struct {
 		tok handlers.UserToken
 		id  string
@@ -221,12 +217,11 @@ func (s *PackSuite) TestReveal() {
 		s.T().Skip("No unrevealed packs found for any user.")
 	}
 
-	// Worker pool.
 	jobCh := make(chan job, len(allJobs))
 	rowCh := make(chan revealRow, len(allJobs))
 	var wg sync.WaitGroup
 
-	for w := 0; w < revealWorkers; w++ {
+	for w := 0; w < s.cfg.RevealWorkers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -234,7 +229,6 @@ func (s *PackSuite) TestReveal() {
 				start := time.Now()
 				rr := handlers.RevealPack(cfg.SpinnerBFFURL, j.tok.AccessToken, j.id, j.tok.Email)
 				dur := time.Since(start)
-
 				row := revealRow{
 					PackID:     j.id,
 					Email:      j.tok.Email,
@@ -277,9 +271,9 @@ func (s *PackSuite) TestReveal() {
 	}
 
 	rep := run.Finish()
-	s.writeReport(rep, outDir)
-	s.storeSuiteReport(rep)
-	s.logSummary(rep)
+	s.WriteReport(rep)
+	s.StoreSuiteReport(rep)
+	s.LogSummary(rep)
 
 	if failCount > 0 {
 		s.Fail(fmt.Sprintf("%d reveal failure(s)", failCount))
@@ -292,35 +286,34 @@ func (s *PackSuite) TestReveal() {
 
 func (s *PackSuite) TestBuyAndReveal() {
 	cfg := s.Cfg
-	outDir := reportDir()
 
-	packInfo, err := handlers.FetchPackInfo(cfg.SpinnerBFFURL, s.validTokens[0].AccessToken, buyPackMasterID)
+	packInfo, err := handlers.FetchPackInfo(cfg.SpinnerBFFURL, s.validTokens[0].AccessToken, s.cfg.PackMasterID)
 	s.Require().NoError(err, "FetchPackInfo failed")
 
 	s.T().Logf("Pack: %s | PriceConfig: %s | Currency: %s | Price: %.4f | Limit: %d",
 		packInfo.PackName, packInfo.PriceConfigID, packInfo.PriceCurrency, packInfo.PriceValue, packInfo.PerSessionLimit)
 
-	if packInfo.PerSessionLimit > 0 && buyQuantity > packInfo.PerSessionLimit {
-		s.T().Logf("WARNING: buyQuantity (%d) exceeds perSessionLimit (%d)", buyQuantity, packInfo.PerSessionLimit)
+	if packInfo.PerSessionLimit > 0 && s.cfg.Quantity > packInfo.PerSessionLimit {
+		s.T().Logf("WARNING: quantity (%d) exceeds perSessionLimit (%d)", s.cfg.Quantity, packInfo.PerSessionLimit)
 	}
 
 	packReq := handlers.BuyPackRequest{
-		PackMasterID:  buyPackMasterID,
-		Quantity:      buyQuantity,
+		PackMasterID:  s.cfg.PackMasterID,
+		Quantity:      s.cfg.Quantity,
 		PriceConfigID: packInfo.PriceConfigID,
 	}
 
 	run := reporter.NewRunner[buyRevealRow]("Buy and Reveal Packs", reporter.NewMeta(
-		cfg.Env, cfg.SpinnerBFFURL, "",
+		cfg.Env, cfg.SpinnerBFFURL, "config_buy_reveal.json",
 		"pack", "buy", "reveal",
 	))
 	run.Annotate("pack_name", packInfo.PackName)
-	run.Annotate("pack_id", buyPackMasterID)
-	run.Annotate("quantity_per_user", fmt.Sprintf("%d", buyQuantity))
+	run.Annotate("pack_id", s.cfg.PackMasterID)
+	run.Annotate("quantity_per_user", fmt.Sprintf("%d", s.cfg.Quantity))
 	run.Annotate("users", fmt.Sprintf("%d", len(s.validTokens)))
 	run.Annotate("price_config_id", packInfo.PriceConfigID)
 
-	requiredBalance := packInfo.PriceValue * float64(buyQuantity)
+	requiredBalance := packInfo.PriceValue * float64(s.cfg.Quantity)
 	run.Annotate("price_currency", packInfo.PriceCurrency)
 	run.Annotate("price_per_pack", fmt.Sprintf("%.4f %s", packInfo.PriceValue, packInfo.PriceCurrency))
 	run.Annotate("required_balance", fmt.Sprintf("%.4f %s", requiredBalance, packInfo.PriceCurrency))
@@ -332,15 +325,12 @@ func (s *PackSuite) TestBuyAndReveal() {
 		wg.Add(1)
 		go func(ut handlers.UserToken) {
 			defer wg.Done()
-
-			// Fetch wallet before buy — skip user if balance is insufficient.
 			walletBefore, err := handlers.FetchWallet(cfg.FcBFFURL, ut.AccessToken)
 			if err != nil {
 				s.T().Logf("WARN | wallet fetch failed for %s: %v — proceeding without wallet check", ut.Email, err)
-				rowCh <- runBuyAndReveal(cfg.SpinnerBFFURL, cfg.FcBFFURL, ut, packReq, packInfo.PriceCurrency, requiredBalance, 0)
+				rowCh <- runBuyAndReveal(cfg.SpinnerBFFURL, cfg.FcBFFURL, ut, packReq, packInfo.PriceCurrency, requiredBalance, 0, s.cfg.EnableReveal)
 				return
 			}
-
 			balanceBefore := walletBefore.Unlocked(packInfo.PriceCurrency)
 			if !walletBefore.HasSufficientBalance(packInfo.PriceCurrency, requiredBalance) {
 				s.T().Logf("SKIP | %s | %s balance %.4f < required %.4f",
@@ -354,10 +344,9 @@ func (s *PackSuite) TestBuyAndReveal() {
 				}
 				return
 			}
-
 			s.T().Logf("OK   | %s | %s balance %.4f >= required %.4f — proceeding",
 				ut.Email, packInfo.PriceCurrency, balanceBefore, requiredBalance)
-			rowCh <- runBuyAndReveal(cfg.SpinnerBFFURL, cfg.FcBFFURL, ut, packReq, packInfo.PriceCurrency, requiredBalance, balanceBefore)
+			rowCh <- runBuyAndReveal(cfg.SpinnerBFFURL, cfg.FcBFFURL, ut, packReq, packInfo.PriceCurrency, requiredBalance, balanceBefore, s.cfg.EnableReveal)
 		}(tok)
 	}
 	wg.Wait()
@@ -377,9 +366,9 @@ func (s *PackSuite) TestBuyAndReveal() {
 	}
 
 	rep := run.Finish()
-	s.writeReport(rep, outDir)
-	s.storeSuiteReport(rep)
-	s.logSummary(rep)
+	s.WriteReport(rep)
+	s.StoreSuiteReport(rep)
+	s.LogSummary(rep)
 
 	if failCount > 0 {
 		s.Fail(fmt.Sprintf("%d buy/reveal failure(s)", failCount))
@@ -390,7 +379,7 @@ func (s *PackSuite) TestBuyAndReveal() {
 // WORKER
 // ──────────────────────────────────────────────────────────────────────────────
 
-func runBuyAndReveal(spinnerBFFURL, fcBFFURL string, tok handlers.UserToken, req handlers.BuyPackRequest, priceCurrency string, expectedDeduction, walletBefore float64) buyRevealRow {
+func runBuyAndReveal(spinnerBFFURL, fcBFFURL string, tok handlers.UserToken, req handlers.BuyPackRequest, priceCurrency string, expectedDeduction, walletBefore float64, enableReveal bool) buyRevealRow {
 	buyStart := time.Now()
 	buyRes := handlers.BuyPack(spinnerBFFURL, tok.AccessToken, req, tok.Email)
 	buyDur := time.Since(buyStart)
@@ -417,12 +406,10 @@ func runBuyAndReveal(spinnerBFFURL, fcBFFURL string, tok handlers.UserToken, req
 		return row
 	}
 
-	// Fetch wallet after buy to verify deduction — only when we have a before balance.
 	if priceCurrency != "" && walletBefore > 0 {
 		if walletAfter, err := handlers.FetchWallet(fcBFFURL, tok.AccessToken); err == nil {
 			row.WalletAfter = walletAfter.Unlocked(priceCurrency)
 			row.ActualDeduction = walletBefore - row.WalletAfter
-			// Allow 0.0001 tolerance for floating-point imprecision.
 			diff := row.ActualDeduction - expectedDeduction
 			if diff < 0 {
 				diff = -diff
@@ -469,29 +456,4 @@ func runBuyAndReveal(spinnerBFFURL, fcBFFURL string, tok handlers.UserToken, req
 		}
 	}
 	return row
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// HELPERS
-// ──────────────────────────────────────────────────────────────────────────────
-
-func (s *PackSuite) writeReport(rep *reporter.Report, outDir string) {
-	jsonPath, err := reporter.WriteJSON(rep, outDir)
-	if err != nil {
-		s.T().Logf("report write error: %v", err)
-		return
-	}
-	s.T().Logf("JSON report: %s", jsonPath)
-}
-
-func (s *PackSuite) logSummary(rep *reporter.Report) {
-	sm := rep.Summary
-	s.T().Logf("────────── %s SUMMARY ──────────", rep.Name)
-	s.T().Logf("Total: %d  Pass: %d  Fail: %d  Warn: %d  Skip: %d",
-		sm.Total, sm.PassCount, sm.FailCount, sm.WarnCount, sm.SkipCount)
-	s.T().Logf("Success rate: %.1f%%", sm.SuccessRate)
-	s.T().Logf("Latency — p50:%dms  p95:%dms  p99:%dms  max:%dms",
-		sm.Latency.P50Ms, sm.Latency.P95Ms, sm.Latency.P99Ms, sm.Latency.MaxMs)
-	s.T().Logf("Wall time: %d ms", sm.WallTimeMs)
-	s.T().Logf("────────────────────────────────────────")
 }

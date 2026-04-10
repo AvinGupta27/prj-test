@@ -1,0 +1,9 @@
+{
+  "_comment": "Buy and reveal test config. Edit values here — no code change or commit needed.",
+
+  "packMasterID":  "69ce3ade5f131ce16676c7b7",
+  "quantity":      2,
+  "enableReveal":  false,
+  "revealWorkers": 10,
+  "usersFile":     "users.json"
+}

@@ -90,8 +90,11 @@ func FetchPackInfo(spinnerBFFURL, token, packMasterID string) (*PackInfo, error)
 		return nil, fmt.Errorf("FetchPackInfo: parse inner data: %w", err)
 	}
 
-	// Search heroSection first, then packs (union of all listed packs).
-	all := append(data.HeroSection, data.Packs...)
+	// Search heroSection + packs (union). Use a new slice to avoid mutating
+	// data.HeroSection's backing array if it has excess capacity.
+	all := make([]enrichedPack, 0, len(data.HeroSection)+len(data.Packs))
+	all = append(all, data.HeroSection...)
+	all = append(all, data.Packs...)
 
 	// Deduplicate by ID — heroSection and packs may overlap.
 	seen := make(map[string]bool)
