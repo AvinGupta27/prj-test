@@ -11,7 +11,7 @@
 #   make all
 # ──────────────────────────────────────────────────────────────────────────────
 
-.PHONY: all reveal buy-reveal supply build tidy help
+.PHONY: all reveal buy-reveal supply build tidy help clean-reports
 
 # Default: print help
 .DEFAULT_GOAL := help
@@ -29,6 +29,9 @@ buy-reveal:
 ## supply: Assert supply integrity — total allocations must not exceed maxSupply
 supply:
 	go test ./tests/... -v -run TestSupplySuite/TestSupplyIntegrity -count=1
+
+clean-reports:
+	rm -rf reports/*
 
 ## all: Run all test suites
 all:

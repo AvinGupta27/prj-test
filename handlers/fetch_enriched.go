@@ -70,10 +70,10 @@ func FetchPackInfo(spinnerBFFURL, token, packMasterID string) (*PackInfo, error)
 	resp, err := client.R().
 		SetHeader("Authorization", token).
 		SetHeader("Content-Type", "application/json").
+		SetHeader("source", "WEB").
 		SetQueryParam("countryCode", countryCode).
 		SetResult(&apiResp).
 		Get(spinnerBFFURL + constants.PacksEnriched)
-
 	if err != nil {
 		return nil, fmt.Errorf("FetchPackInfo: request error: %w", err)
 	}
@@ -102,7 +102,6 @@ func FetchPackInfo(spinnerBFFURL, token, packMasterID string) (*PackInfo, error)
 			unique = append(unique, p)
 		}
 	}
-
 	// Find the target pack.
 	for _, p := range unique {
 		if p.ID != packMasterID {
@@ -121,15 +120,14 @@ func FetchPackInfo(spinnerBFFURL, token, packMasterID string) (*PackInfo, error)
 		sort.Strings(configKeys)
 		priceConfigID := configKeys[0]
 
-		// Extract the first currency + price for info purposes.
+		// Extract currency + price from the selected priceConfigID.
+		// Each priceConfigID has exactly one currency entry (e.g. {"GC12": 0.45}).
 		var currency string
 		var priceVal float64
 		for cur, val := range p.PriceConfig[priceConfigID] {
 			currency = cur
 			priceVal = val
-			break
 		}
-
 		return &PackInfo{
 			PackMasterID:    p.ID,
 			PackName:        p.PackName,

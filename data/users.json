@@ -1,11 +1,10 @@
 [
-  { "email": "avin@fancraze.com",  "otp": "123123" },
-  { "email": "avin+master@fancraze.com",  "otp": "123123" },
-  { "email": "prem+fc2@fancraze.com",  "otp": "123456" },
-  { "email": "vasu@fancraze.com",  "otp": "123123" },
-  { "email": "avin+zx@fancraze.com",  "otp": "123123" },
-  { "email": "vasu+01@fancraze.com",  "otp": "123123" },
-  {"email": "vasu+automationa@fancraze.com", "otp": "123123"},
-  {"email": "prem@fancraze.com", "otp": "123456"}
-
+  { "email": "avin@fancraze.com", "otp": "123123" },
+  { "email": "avin+master@fancraze.com", "otp": "123123" },
+  { "email": "prem+fc2@fancraze.com", "otp": "123456" },
+  { "email": "vasu@fancraze.com", "otp": "123123" },
+  { "email": "avin+zx@fancraze.com", "otp": "123123" },
+  { "email": "vasu+01@fancraze.com", "otp": "123123" },
+  { "email": "vasu+automationa@fancraze.com", "otp": "123123" },
+  { "email": "prem@fancraze.com", "otp": "123456" }
 ]

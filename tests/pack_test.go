@@ -2,7 +2,6 @@ package tests
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -18,12 +17,134 @@ import (
 // ──────────────────────────────────────────────────────────────────────────────
 
 const (
-	revealWorkers   = 5
+	revealWorkers   = 10
 	buyPackMasterID = "69ce3ade5f131ce16676c7b7"
-	buyQuantity     = 1
-	enableReveal    = true
+	buyQuantity     = 2
+	enableReveal    = false
 	usersFile       = "users.json"
 )
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ROW TYPES
+// Each implements reporter.Row — no other reporting code needed in this file.
+// ──────────────────────────────────────────────────────────────────────────────
+
+// revealRow is the result of one reveal API call.
+type revealRow struct {
+	PackID     string
+	Email      string
+	HTTPStatus int
+	Dur        time.Duration
+	Failure    reporter.FailureDetail
+}
+
+func (r revealRow) RowStatus() reporter.Status {
+	if r.Failure.IsZero() && r.HTTPStatus == 200 {
+		return reporter.StatusPass
+	}
+	return reporter.StatusFail
+}
+func (r revealRow) RowLatency() time.Duration { return r.Dur }
+func (r revealRow) RowLabel() string          { return r.PackID }
+func (r revealRow) RowColumns() []reporter.Column {
+	return []reporter.Column{
+		{Header: "User", Value: r.Email},
+		{Header: "HTTP", Value: fmt.Sprintf("%d", r.HTTPStatus)},
+		{Header: "Latency", Value: fmt.Sprintf("%d ms", r.Dur.Milliseconds())},
+	}
+}
+func (r revealRow) RowDetails() []reporter.Detail {
+	return r.Failure.ToDetails()
+}
+
+// buyRevealRow is the result of one user's full buy + reveal flow.
+type buyRevealRow struct {
+	Email             string
+	PackIDs           []string
+	NFTCount          int
+	TotalValue        float64
+	BuyStatus         int
+	BuyDur            time.Duration
+	RevDur            time.Duration
+	BuyFailure        reporter.FailureDetail
+	RevFailures       []reporter.FailureDetail
+	// Wallet fields
+	WalletSkipped     bool    // true if skipped due to insufficient balance
+	PriceCurrency     string
+	ExpectedDeduction float64 // price × quantity
+	WalletBefore      float64 // unlocked balance before buy
+	WalletAfter       float64 // unlocked balance after buy
+	ActualDeduction   float64 // WalletBefore - WalletAfter
+	WalletCheckOK     bool    // true if actual deduction matches expected
+}
+
+func (r buyRevealRow) RowStatus() reporter.Status {
+	if r.WalletSkipped {
+		return reporter.StatusSkip
+	}
+	if !r.BuyFailure.IsZero() {
+		return reporter.StatusFail
+	}
+	for _, f := range r.RevFailures {
+		if !f.IsZero() {
+			return reporter.StatusFail
+		}
+	}
+	if !r.WalletCheckOK {
+		return reporter.StatusWarning
+	}
+	return reporter.StatusPass
+}
+func (r buyRevealRow) RowLatency() time.Duration { return r.BuyDur + r.RevDur }
+func (r buyRevealRow) RowLabel() string          { return r.Email }
+func (r buyRevealRow) RowColumns() []reporter.Column {
+	walletStatus := "—"
+	if !r.WalletSkipped && r.PriceCurrency != "" {
+		if r.WalletCheckOK {
+			walletStatus = fmt.Sprintf("✓ %.4f deducted", r.ActualDeduction)
+		} else {
+			walletStatus = fmt.Sprintf("✗ expected %.4f got %.4f", r.ExpectedDeduction, r.ActualDeduction)
+		}
+	}
+	return []reporter.Column{
+		{Header: "Packs", Value: fmt.Sprintf("%d", len(r.PackIDs))},
+		{Header: "NFTs", Value: fmt.Sprintf("%d", r.NFTCount)},
+		{Header: "Total Value", Value: fmt.Sprintf("%.2f", r.TotalValue)},
+		{Header: "Buy Status", Value: fmt.Sprintf("%d", r.BuyStatus)},
+		{Header: "Buy Latency", Value: fmt.Sprintf("%d ms", r.BuyDur.Milliseconds())},
+		{Header: "Rev Latency", Value: fmt.Sprintf("%d ms", r.RevDur.Milliseconds())},
+		{Header: "Wallet Check", Value: walletStatus},
+	}
+}
+func (r buyRevealRow) RowDetails() []reporter.Detail {
+	var d []reporter.Detail
+
+	if r.WalletSkipped {
+		d = append(d, reporter.Detail{Key: "Skip Reason", Value: fmt.Sprintf("Insufficient %s balance (%.4f < %.4f required)", r.PriceCurrency, r.WalletBefore, r.ExpectedDeduction)})
+		return d
+	}
+
+	// Wallet section — always shown when wallet data is available.
+	if r.PriceCurrency != "" {
+		d = append(d,
+			reporter.Detail{Key: "Currency", Value: r.PriceCurrency},
+			reporter.Detail{Key: "Balance Before", Value: fmt.Sprintf("%.6f", r.WalletBefore)},
+			reporter.Detail{Key: "Balance After", Value: fmt.Sprintf("%.6f", r.WalletAfter)},
+			reporter.Detail{Key: "Expected Deduction", Value: fmt.Sprintf("%.6f", r.ExpectedDeduction)},
+			reporter.Detail{Key: "Actual Deduction", Value: fmt.Sprintf("%.6f", r.ActualDeduction)},
+			reporter.Detail{Key: "Wallet Check", Value: map[bool]string{true: "PASS", false: "FAIL — deduction mismatch"}[r.WalletCheckOK]},
+		)
+	}
+
+	if len(r.PackIDs) > 0 {
+		d = append(d, reporter.Detail{Key: "Pack IDs", Value: strings.Join(r.PackIDs, ", "), Mono: true})
+	}
+	d = append(d, r.BuyFailure.ToDetails()...)
+	for _, f := range r.RevFailures {
+		d = append(d, f.ToDetails()...)
+	}
+	return d
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // SUITE
@@ -34,19 +155,16 @@ type PackSuite struct {
 	validTokens []handlers.UserToken
 }
 
-// SetupSuite loads config (via BaseSuite), then authenticates all users once.
-// Both TestReveal and TestBuyAndReveal share the resulting tokens.
 func (s *PackSuite) SetupSuite() {
 	s.BaseSuite.SetupSuite()
 
 	users, err := handlers.LoadUsers(config.DataPath(usersFile))
 	s.Require().NoError(err, "failed to load users from %s", usersFile)
-	s.Require().NotEmpty(users, "%s is empty — add at least one account", usersFile)
+	s.Require().NotEmpty(users, "%s is empty", usersFile)
 	s.T().Logf("Loaded %d user account(s)", len(users))
 
 	s.T().Log("Authenticating all users in parallel …")
 	tokens := handlers.GenerateAllTokens(s.Cfg.FcBFFURL, users)
-
 	for _, tok := range tokens {
 		if tok.Err != nil {
 			s.T().Logf("Auth SKIPPED for %s: %v", tok.Email, tok.Err)
@@ -55,135 +173,113 @@ func (s *PackSuite) SetupSuite() {
 			s.T().Logf("Auth OK for %s", tok.Email)
 		}
 	}
-	s.Require().NotEmpty(s.validTokens, "all authentications failed — cannot proceed")
+	s.Require().NotEmpty(s.validTokens, "all authentications failed")
 }
 
-// Entry point — run with:
-//
-//	go test ./tests/... -v                            (both tests)
-//	go test ./tests/... -v -run TestPackSuite/TestReveal
-//	go test ./tests/... -v -run TestPackSuite/TestBuyAndReveal
 func TestPackSuite(t *testing.T) {
 	RunSuite(t, new(PackSuite))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // TestReveal
-//
-// For every authenticated user, fetch their unrevealed packs and reveal them
-// via a shared worker pool.
 // ──────────────────────────────────────────────────────────────────────────────
-
-type revealJob struct {
-	token handlers.UserToken
-	id    string
-}
-
-type revealResult struct {
-	id        string
-	email     string
-	success   bool
-	status    int
-	latencyMs int64
-	errorMsg  string
-}
 
 func (s *PackSuite) TestReveal() {
 	cfg := s.Cfg
+	outDir := reportDir()
 
-	// Collect all (token, packID) pairs across every user.
-	var allJobs []revealJob
+	run := reporter.NewRunner[revealRow]("Reveal Packs", reporter.NewMeta(
+		cfg.Env, cfg.SpinnerBFFURL, "",
+		"pack", "reveal",
+	))
+	run.Annotate("users_authed", fmt.Sprintf("%d", len(s.validTokens)))
+
+	// Collect all (token, packID) jobs across every user.
+	type job struct {
+		tok handlers.UserToken
+		id  string
+	}
+	var allJobs []job
+	var totalUnrevealed int
+
 	for _, tok := range s.validTokens {
 		ids, err := handlers.FetchUnrevealedPackIDs(cfg.SpinnerBFFURL, tok.AccessToken)
 		if err != nil {
-			s.T().Errorf("failed fetching unrevealed packs for %s: %v", tok.Email, err)
+			s.T().Errorf("fetch unrevealed failed for %s: %v", tok.Email, err)
 			continue
 		}
+		totalUnrevealed += len(ids)
 		s.T().Logf("Found %d unrevealed pack(s) for %s", len(ids), tok.Email)
 		for _, id := range ids {
-			allJobs = append(allJobs, revealJob{token: tok, id: id})
+			allJobs = append(allJobs, job{tok: tok, id: id})
 		}
 	}
+
+	run.Annotate("total_packs", fmt.Sprintf("%d", totalUnrevealed))
 
 	if len(allJobs) == 0 {
 		s.T().Skip("No unrevealed packs found for any user.")
 	}
-	s.T().Logf("Total unrevealed packs: %d  |  Workers: %d", len(allJobs), revealWorkers)
 
-	jobs := make(chan revealJob, len(allJobs))
-	results := make(chan revealResult, len(allJobs))
+	// Worker pool.
+	jobCh := make(chan job, len(allJobs))
+	rowCh := make(chan revealRow, len(allJobs))
 	var wg sync.WaitGroup
 
 	for w := 0; w < revealWorkers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for job := range jobs {
-				rr := handlers.RevealPack(cfg.SpinnerBFFURL, job.token.AccessToken, job.id, job.token.Email)
-				results <- revealResult{
-					id:        job.id,
-					email:     job.token.Email,
-					success:   rr.Success,
-					status:    rr.Status,
-					latencyMs: rr.LatencyMs,
-					errorMsg:  rr.ErrorMsg,
+			for j := range jobCh {
+				start := time.Now()
+				rr := handlers.RevealPack(cfg.SpinnerBFFURL, j.tok.AccessToken, j.id, j.tok.Email)
+				dur := time.Since(start)
+
+				row := revealRow{
+					PackID:     j.id,
+					Email:      j.tok.Email,
+					HTTPStatus: rr.Status,
+					Dur:        dur,
 				}
+				if !rr.Success {
+					row.Failure = reporter.FailureDetail{
+						RequestMethod:  "POST",
+						RequestURL:     cfg.SpinnerBFFURL + "/api/v1/userpacks/reveal",
+						RequestBody:    fmt.Sprintf(`{"userPackId":"%s"}`, j.id),
+						ResponseStatus: rr.Status,
+						ResponseBody:   rr.ErrorMsg,
+						ErrorChain:     rr.ErrorMsg,
+						OccurredAt:     time.Now(),
+					}
+				}
+				rowCh <- row
 			}
 		}()
 	}
 
-	for _, job := range allJobs {
-		jobs <- job
+	for _, j := range allJobs {
+		jobCh <- j
 	}
-	close(jobs)
-
-	go func() { wg.Wait(); close(results) }()
-
-	rep := reporter.New(cfg.Env, "Reveal Packs API", revealWorkers)
-	outDir := filepath.Join(config.Root(), "reports")
-	start := time.Now()
+	close(jobCh)
+	go func() { wg.Wait(); close(rowCh) }()
 
 	var failCount int
-	userErrors := make(map[string][]string)
-
-	for res := range results {
-		rep.AddResult(reporter.TestResult{
-			ID:        res.id,
-			Success:   res.success,
-			Status:    res.status,
-			LatencyMs: res.latencyMs,
-			ErrorMsg:  res.errorMsg,
-		})
-		if !res.success {
+	for row := range rowCh {
+		run.Add(row)
+		if row.RowStatus() == reporter.StatusFail {
 			failCount++
-			userErrors[res.email] = append(userErrors[res.email],
-				fmt.Sprintf("[%s] %s", res.id, res.errorMsg))
-			s.T().Errorf("FAIL | User=%-30s | ID=%-30s | Status=%d | Error=%s",
-				res.email, res.id, res.status, res.errorMsg)
+			s.T().Errorf("FAIL | User=%-30s | ID=%-30s | Status=%d | %s",
+				row.Email, row.PackID, row.HTTPStatus, row.Failure.ErrorChain)
 		} else {
-			s.T().Logf("OK   | User=%-30s | ID=%-30s | Status=%d | %dms",
-				res.email, res.id, res.status, res.latencyMs)
+			s.T().Logf("OK   | User=%-30s | ID=%-30s | %d ms",
+				row.Email, row.PackID, row.Dur.Milliseconds())
 		}
 	}
 
-	rep.Finalize(time.Since(start))
-	s.writeReports(rep, outDir)
-
-	if len(userErrors) > 0 {
-		s.T().Logf("────────── PER-USER FAILURES ──────────")
-		for email, errs := range userErrors {
-			s.T().Logf("%s: %s", email, strings.Join(errs, " | "))
-		}
-	}
-
-	s.T().Logf("────────────── REVEAL SUMMARY ──────────────")
-	s.T().Logf("Total users:    %d", len(s.validTokens))
-	s.T().Logf("Total packs:    %d", rep.Summary.TotalRequests)
-	s.T().Logf("Success:        %d", rep.Summary.SuccessCount)
-	s.T().Logf("Failed:         %d", rep.Summary.FailureCount)
-	s.T().Logf("Avg latency:    %d ms", rep.Summary.AvgLatencyMs)
-	s.T().Logf("Wall time:      %d ms", rep.Summary.TotalTimeMs)
-	s.T().Logf("────────────────────────────────────────────")
+	rep := run.Finish()
+	s.writeReport(rep, outDir)
+	s.storeSuiteReport(rep)
+	s.logSummary(rep)
 
 	if failCount > 0 {
 		s.Fail(fmt.Sprintf("%d reveal failure(s)", failCount))
@@ -192,34 +288,20 @@ func (s *PackSuite) TestReveal() {
 
 // ──────────────────────────────────────────────────────────────────────────────
 // TestBuyAndReveal
-//
-// For every authenticated user, buy N packs then reveal all returned pack IDs.
 // ──────────────────────────────────────────────────────────────────────────────
-
-type buyRevealJob struct {
-	buyResult     handlers.BuyPackResult
-	revealResults []handlers.RevealResult
-}
 
 func (s *PackSuite) TestBuyAndReveal() {
 	cfg := s.Cfg
+	outDir := reportDir()
 
-	// Resolve pack config once using the first valid token.
-	s.T().Logf("Fetching pack config (packId=%s) …", buyPackMasterID)
 	packInfo, err := handlers.FetchPackInfo(cfg.SpinnerBFFURL, s.validTokens[0].AccessToken, buyPackMasterID)
 	s.Require().NoError(err, "FetchPackInfo failed")
 
-	s.T().Logf("Pack:          %s", packInfo.PackName)
-	s.T().Logf("Price Config:  id=%s  currency=%s  price=%.4f",
-		packInfo.PriceConfigID, packInfo.PriceCurrency, packInfo.PriceValue)
-	s.T().Logf("Session limit: %d  |  Sold: %d / %d",
-		packInfo.PerSessionLimit, packInfo.PacksSold, packInfo.TotalPackCount)
-	if packInfo.PackOpeningDate != "" {
-		s.T().Logf("Opening date:  %s", packInfo.PackOpeningDate)
-	}
+	s.T().Logf("Pack: %s | PriceConfig: %s | Currency: %s | Price: %.4f | Limit: %d",
+		packInfo.PackName, packInfo.PriceConfigID, packInfo.PriceCurrency, packInfo.PriceValue, packInfo.PerSessionLimit)
+
 	if packInfo.PerSessionLimit > 0 && buyQuantity > packInfo.PerSessionLimit {
-		s.T().Logf("WARNING: buyQuantity (%d) exceeds perSessionLimit (%d)",
-			buyQuantity, packInfo.PerSessionLimit)
+		s.T().Logf("WARNING: buyQuantity (%d) exceeds perSessionLimit (%d)", buyQuantity, packInfo.PerSessionLimit)
 	}
 
 	packReq := handlers.BuyPackRequest{
@@ -228,157 +310,188 @@ func (s *PackSuite) TestBuyAndReveal() {
 		PriceConfigID: packInfo.PriceConfigID,
 	}
 
-	// One goroutine per user — buy then reveal.
-	results := make(chan buyRevealJob, len(s.validTokens))
+	run := reporter.NewRunner[buyRevealRow]("Buy and Reveal Packs", reporter.NewMeta(
+		cfg.Env, cfg.SpinnerBFFURL, "",
+		"pack", "buy", "reveal",
+	))
+	run.Annotate("pack_name", packInfo.PackName)
+	run.Annotate("pack_id", buyPackMasterID)
+	run.Annotate("quantity_per_user", fmt.Sprintf("%d", buyQuantity))
+	run.Annotate("users", fmt.Sprintf("%d", len(s.validTokens)))
+	run.Annotate("price_config_id", packInfo.PriceConfigID)
+
+	requiredBalance := packInfo.PriceValue * float64(buyQuantity)
+	run.Annotate("price_currency", packInfo.PriceCurrency)
+	run.Annotate("price_per_pack", fmt.Sprintf("%.4f %s", packInfo.PriceValue, packInfo.PriceCurrency))
+	run.Annotate("required_balance", fmt.Sprintf("%.4f %s", requiredBalance, packInfo.PriceCurrency))
+
+	rowCh := make(chan buyRevealRow, len(s.validTokens))
 	var wg sync.WaitGroup
-	start := time.Now()
 
 	for _, tok := range s.validTokens {
 		wg.Add(1)
 		go func(ut handlers.UserToken) {
 			defer wg.Done()
-			results <- runBuyAndReveal(cfg.SpinnerBFFURL, ut, packReq)
+
+			// Fetch wallet before buy — skip user if balance is insufficient.
+			walletBefore, err := handlers.FetchWallet(cfg.FcBFFURL, ut.AccessToken)
+			if err != nil {
+				s.T().Logf("WARN | wallet fetch failed for %s: %v — proceeding without wallet check", ut.Email, err)
+				rowCh <- runBuyAndReveal(cfg.SpinnerBFFURL, cfg.FcBFFURL, ut, packReq, packInfo.PriceCurrency, requiredBalance, 0)
+				return
+			}
+
+			balanceBefore := walletBefore.Unlocked(packInfo.PriceCurrency)
+			if !walletBefore.HasSufficientBalance(packInfo.PriceCurrency, requiredBalance) {
+				s.T().Logf("SKIP | %s | %s balance %.4f < required %.4f",
+					ut.Email, packInfo.PriceCurrency, balanceBefore, requiredBalance)
+				rowCh <- buyRevealRow{
+					Email:             ut.Email,
+					WalletSkipped:     true,
+					PriceCurrency:     packInfo.PriceCurrency,
+					ExpectedDeduction: requiredBalance,
+					WalletBefore:      balanceBefore,
+				}
+				return
+			}
+
+			s.T().Logf("OK   | %s | %s balance %.4f >= required %.4f — proceeding",
+				ut.Email, packInfo.PriceCurrency, balanceBefore, requiredBalance)
+			rowCh <- runBuyAndReveal(cfg.SpinnerBFFURL, cfg.FcBFFURL, ut, packReq, packInfo.PriceCurrency, requiredBalance, balanceBefore)
 		}(tok)
 	}
-
 	wg.Wait()
-	close(results)
+	close(rowCh)
 
-	packCfg := reporter.BuyPackConfig{
-		PackMasterID:  buyPackMasterID,
-		Quantity:      buyQuantity,
-		PriceConfigID: packInfo.PriceConfigID,
-		SpinnerBFFURL: cfg.SpinnerBFFURL,
-	}
-	rep := reporter.NewBuyReveal(cfg.Env, packCfg)
-	outDir := filepath.Join(config.Root(), "reports")
-
-	for res := range results {
-		br := res.buyResult
-		row := reporter.BuyRevealResult{
-			Email:        br.Email,
-			UserPackIDs:  br.UserPackIDs,
-			BuySuccess:   br.Success,
-			BuyStatus:    br.Status,
-			BuyLatencyMs: br.LatencyMs,
-			BuyError:     br.ErrorMsg,
-			RevealDone:   len(res.revealResults) > 0,
-		}
-
-		var revealErrors []string
-		allRevealsOK := true
-		for _, rr := range res.revealResults {
-			if !rr.Success {
-				allRevealsOK = false
-				revealErrors = append(revealErrors, fmt.Sprintf("[%s] %s", rr.UserPackID, rr.ErrorMsg))
-			}
-			row.RevLatencyMs += rr.LatencyMs
-			row.NFTCount += rr.NFTCount
-			row.TotalValue += rr.TotalValue
-			for _, n := range rr.NFTs {
-				row.NFTs = append(row.NFTs, reporter.NFTItem{
-					NFTTokenID: n.NFTTokenID,
-					CardName:   n.CardName,
-					Rarity:     n.Rarity,
-					Value:      n.Value,
-				})
-			}
-		}
-		if len(res.revealResults) > 0 {
-			row.RevLatencyMs /= int64(len(res.revealResults))
-			row.RevSuccess = allRevealsOK
-			if !allRevealsOK {
-				row.RevError = strings.Join(revealErrors, " | ")
-			}
-		}
-
-		rep.AddBuyRevealResult(row)
-
-		if !br.Success {
-			s.T().Errorf("BUY FAILED    | User=%s | Status=%d | Error=%s",
-				br.Email, br.Status, br.ErrorMsg)
-		} else if !allRevealsOK {
-			s.T().Errorf("REVEAL FAILED | User=%s | Errors=%s", br.Email, row.RevError)
+	var failCount int
+	for row := range rowCh {
+		run.Add(row)
+		if row.RowStatus() == reporter.StatusFail {
+			failCount++
+			s.T().Errorf("FAIL | User=%-30s | BuyStatus=%d | %s",
+				row.Email, row.BuyStatus, row.BuyFailure.ErrorChain)
 		} else {
-			s.T().Logf("OK | User=%-30s | Packs=%d | NFTs=%d | Value=%.2f",
-				br.Email, len(br.UserPackIDs), row.NFTCount, row.TotalValue)
+			s.T().Logf("OK   | User=%-30s | Packs=%d | NFTs=%d | Value=%.2f",
+				row.Email, len(row.PackIDs), row.NFTCount, row.TotalValue)
 		}
 	}
 
-	rep.FinalizeBuyReveal(time.Since(start))
-	s.writeBuyRevealReports(rep, outDir)
+	rep := run.Finish()
+	s.writeReport(rep, outDir)
+	s.storeSuiteReport(rep)
+	s.logSummary(rep)
 
-	sm := rep.Summary
-	s.T().Logf("────────────── BUY & REVEAL SUMMARY ──────────────")
-	s.T().Logf("Pack:               %s (%s)", packInfo.PackName, buyPackMasterID)
-	s.T().Logf("Total Users:        %d", sm.TotalUsers)
-	s.T().Logf("Buy  Success:       %d / %d", sm.BuySuccessCount, sm.TotalUsers)
-	s.T().Logf("Reveal Success:     %d / %d", sm.RevealSuccessCount, sm.BuySuccessCount)
-	s.T().Logf("Total NFTs:         %d", sm.TotalNFTs)
-	s.T().Logf("Total NFT Value:    %.2f", sm.TotalNFTValue)
-	s.T().Logf("Avg Buy Latency:    %d ms", sm.AvgBuyLatencyMs)
-	s.T().Logf("Avg Reveal Latency: %d ms", sm.AvgRevLatencyMs)
-	s.T().Logf("Wall Time:          %d ms", sm.TotalTimeMs)
-	s.T().Logf("───────────────────────────────────────────────────")
+	if failCount > 0 {
+		s.Fail(fmt.Sprintf("%d buy/reveal failure(s)", failCount))
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// WORKER
+// ──────────────────────────────────────────────────────────────────────────────
+
+func runBuyAndReveal(spinnerBFFURL, fcBFFURL string, tok handlers.UserToken, req handlers.BuyPackRequest, priceCurrency string, expectedDeduction, walletBefore float64) buyRevealRow {
+	buyStart := time.Now()
+	buyRes := handlers.BuyPack(spinnerBFFURL, tok.AccessToken, req, tok.Email)
+	buyDur := time.Since(buyStart)
+
+	row := buyRevealRow{
+		Email:             tok.Email,
+		BuyStatus:         buyRes.Status,
+		BuyDur:            buyDur,
+		PriceCurrency:     priceCurrency,
+		ExpectedDeduction: expectedDeduction,
+		WalletBefore:      walletBefore,
+	}
+
+	if !buyRes.Success {
+		row.BuyFailure = reporter.FailureDetail{
+			RequestMethod:  "POST",
+			RequestURL:     spinnerBFFURL + "/api/v1/packsmaster/buy",
+			RequestBody:    fmt.Sprintf(`{"packMasterId":%q,"quantity":%d}`, req.PackMasterID, req.Quantity),
+			ResponseStatus: buyRes.Status,
+			ResponseBody:   buyRes.ErrorMsg,
+			ErrorChain:     buyRes.ErrorMsg,
+			OccurredAt:     time.Now(),
+		}
+		return row
+	}
+
+	// Fetch wallet after buy to verify deduction — only when we have a before balance.
+	if priceCurrency != "" && walletBefore > 0 {
+		if walletAfter, err := handlers.FetchWallet(fcBFFURL, tok.AccessToken); err == nil {
+			row.WalletAfter = walletAfter.Unlocked(priceCurrency)
+			row.ActualDeduction = walletBefore - row.WalletAfter
+			// Allow 0.0001 tolerance for floating-point imprecision.
+			diff := row.ActualDeduction - expectedDeduction
+			if diff < 0 {
+				diff = -diff
+			}
+			row.WalletCheckOK = diff < 0.0001
+		}
+	}
+
+	row.PackIDs = buyRes.UserPackIDs
+	if !enableReveal || len(buyRes.UserPackIDs) == 0 {
+		return row
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	revCh := make(chan handlers.RevealResult, len(buyRes.UserPackIDs))
+	var wg sync.WaitGroup
+	revStart := time.Now()
+
+	for _, id := range buyRes.UserPackIDs {
+		wg.Add(1)
+		go func(pid string) {
+			defer wg.Done()
+			revCh <- handlers.RevealPack(spinnerBFFURL, tok.AccessToken, pid, tok.Email)
+		}(id)
+	}
+	wg.Wait()
+	close(revCh)
+	row.RevDur = time.Since(revStart)
+
+	for rr := range revCh {
+		row.NFTCount += rr.NFTCount
+		row.TotalValue += rr.TotalValue
+		if !rr.Success {
+			row.RevFailures = append(row.RevFailures, reporter.FailureDetail{
+				RequestMethod:  "POST",
+				RequestURL:     spinnerBFFURL + "/api/v1/userpacks/reveal",
+				RequestBody:    fmt.Sprintf(`{"userPackId":%q}`, rr.UserPackID),
+				ResponseStatus: rr.Status,
+				ResponseBody:   rr.ErrorMsg,
+				ErrorChain:     rr.ErrorMsg,
+				OccurredAt:     time.Now(),
+			})
+		}
+	}
+	return row
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // HELPERS
 // ──────────────────────────────────────────────────────────────────────────────
 
-// runBuyAndReveal buys packs for one user then reveals all returned IDs concurrently.
-func runBuyAndReveal(spinnerBFFURL string, tok handlers.UserToken, req handlers.BuyPackRequest) buyRevealJob {
-	buyRes := handlers.BuyPack(spinnerBFFURL, tok.AccessToken, req, tok.Email)
-	job := buyRevealJob{buyResult: buyRes}
-
-	if !enableReveal || !buyRes.Success || len(buyRes.UserPackIDs) == 0 {
-		return job
+func (s *PackSuite) writeReport(rep *reporter.Report, outDir string) {
+	jsonPath, err := reporter.WriteJSON(rep, outDir)
+	if err != nil {
+		s.T().Logf("report write error: %v", err)
+		return
 	}
-
-	time.Sleep(500 * time.Millisecond)
-
-	revealCh := make(chan handlers.RevealResult, len(buyRes.UserPackIDs))
-	var wg sync.WaitGroup
-	for _, packID := range buyRes.UserPackIDs {
-		wg.Add(1)
-		go func(id string) {
-			defer wg.Done()
-			revealCh <- handlers.RevealPack(spinnerBFFURL, tok.AccessToken, id, tok.Email)
-		}(packID)
-	}
-	wg.Wait()
-	close(revealCh)
-
-	for rr := range revealCh {
-		job.revealResults = append(job.revealResults, rr)
-	}
-	return job
+	s.T().Logf("JSON report: %s", jsonPath)
 }
 
-// writeReports writes JSON + HTML for the reveal-only reporter.
-func (s *PackSuite) writeReports(rep *reporter.Report, outDir string) {
-	if path, err := rep.WriteJSON(outDir); err != nil {
-		s.T().Logf("could not write JSON report: %v", err)
-	} else {
-		s.T().Logf("JSON report: %s", path)
-	}
-	if path, err := rep.WriteHTML(outDir); err != nil {
-		s.T().Logf("could not write HTML report: %v", err)
-	} else {
-		s.T().Logf("HTML report: %s", path)
-	}
-}
-
-// writeBuyRevealReports writes JSON + HTML for the buy+reveal reporter.
-func (s *PackSuite) writeBuyRevealReports(rep *reporter.BuyRevealReport, outDir string) {
-	if path, err := rep.WriteBuyRevealJSON(outDir); err != nil {
-		s.T().Logf("could not write JSON report: %v", err)
-	} else {
-		s.T().Logf("JSON report: %s", path)
-	}
-	if path, err := rep.WriteBuyRevealHTML(outDir); err != nil {
-		s.T().Logf("could not write HTML report: %v", err)
-	} else {
-		s.T().Logf("HTML report: %s", path)
-	}
+func (s *PackSuite) logSummary(rep *reporter.Report) {
+	sm := rep.Summary
+	s.T().Logf("────────── %s SUMMARY ──────────", rep.Name)
+	s.T().Logf("Total: %d  Pass: %d  Fail: %d  Warn: %d  Skip: %d",
+		sm.Total, sm.PassCount, sm.FailCount, sm.WarnCount, sm.SkipCount)
+	s.T().Logf("Success rate: %.1f%%", sm.SuccessRate)
+	s.T().Logf("Latency — p50:%dms  p95:%dms  p99:%dms  max:%dms",
+		sm.Latency.P50Ms, sm.Latency.P95Ms, sm.Latency.P99Ms, sm.Latency.MaxMs)
+	s.T().Logf("Wall time: %d ms", sm.WallTimeMs)
+	s.T().Logf("────────────────────────────────────────")
 }

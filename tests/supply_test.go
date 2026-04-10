@@ -2,7 +2,6 @@ package tests
 
 import (
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -19,7 +18,65 @@ import (
 type supplyConfig struct {
 	EventGroupsPage  int     `json:"eventGroupsPage"`
 	EventGroupsLimit int     `json:"eventGroupsLimit"`
-	TolerancePercent float64 `json:"tolerancePercent"` // e.g. 0.01 = 1%, 0 = strict
+	TolerancePercent float64 `json:"tolerancePercent"`
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ROW TYPE
+// ──────────────────────────────────────────────────────────────────────────────
+
+type supplyRow struct {
+	EventGroupID    string
+	Slug            string
+	MaxSupply       float64
+	FloatingSupply  float64
+	LockedSupply    float64
+	PacksReserve    float64
+	LpReserve       float64
+	AvailableSupply float64
+	Total           float64
+	Overage         float64
+	OveragePct      float64
+	Pass            bool
+}
+
+func (r supplyRow) RowStatus() reporter.Status {
+	if r.Pass {
+		return reporter.StatusPass
+	}
+	return reporter.StatusFail
+}
+func (r supplyRow) RowLatency() time.Duration { return 0 }
+func (r supplyRow) RowLabel() string          { return r.Slug }
+func (r supplyRow) RowColumns() []reporter.Column {
+	return []reporter.Column{
+		{Header: "Max Supply", Value: fmt.Sprintf("%.2f", r.MaxSupply)},
+		{Header: "Floating", Value: fmt.Sprintf("%.2f", r.FloatingSupply)},
+		{Header: "Locked", Value: fmt.Sprintf("%.2f", r.LockedSupply)},
+		{Header: "Packs Reserve", Value: fmt.Sprintf("%.2f", r.PacksReserve)},
+		{Header: "LP Reserve", Value: fmt.Sprintf("%.2f", r.LpReserve)},
+		{Header: "Available", Value: fmt.Sprintf("%.2f", r.AvailableSupply)},
+		{Header: "Total", Value: fmt.Sprintf("%.2f", r.Total)},
+		{Header: "Overage %", Value: fmt.Sprintf("%.4f%%", r.OveragePct)},
+	}
+}
+func (r supplyRow) RowDetails() []reporter.Detail {
+	details := []reporter.Detail{
+		{Key: "Event Group ID", Value: r.EventGroupID, Mono: true},
+	}
+	if r.Pass {
+		return details
+	}
+	return append(details, []reporter.Detail{
+		{Key: "Max Supply", Value: fmt.Sprintf("%.6f", r.MaxSupply)},
+		{Key: "Total Allocated", Value: fmt.Sprintf("%.6f", r.Total)},
+		{Key: "Overage", Value: fmt.Sprintf("%.6f (%.4f%%)", r.Overage, r.OveragePct)},
+		{Key: "Floating Supply", Value: fmt.Sprintf("%.6f", r.FloatingSupply)},
+		{Key: "Locked Supply", Value: fmt.Sprintf("%.6f", r.LockedSupply)},
+		{Key: "Packs Reserve", Value: fmt.Sprintf("%.6f", r.PacksReserve)},
+		{Key: "LP Reserve", Value: fmt.Sprintf("%.6f", r.LpReserve)},
+		{Key: "Available Supply", Value: fmt.Sprintf("%.6f", r.AvailableSupply)},
+	}...)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -30,7 +87,7 @@ type SupplySuite struct {
 	BaseSuite
 	cfg supplyConfig
 
-	// Shared outputs — available to downstream dependent tests.
+	// Shared outputs for downstream dependent tests.
 	EventGroups []handlers.EventGroup
 	Breakdowns  []handlers.SupplyBreakdown
 }
@@ -41,63 +98,57 @@ func TestSupplySuite(t *testing.T) {
 
 func (s *SupplySuite) SetupSuite() {
 	s.BaseSuite.SetupSuite()
-
 	err := testconfig.Load(config.DataPath("config_supply.json"), &s.cfg)
 	s.Require().NoError(err, "failed to load config_supply.json")
-
 	s.T().Logf("Supply config: page=%d  limit=%d  tolerance=%.2f%%",
 		s.cfg.EventGroupsPage, s.cfg.EventGroupsLimit, s.cfg.TolerancePercent*100)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // TestSupplyIntegrity
-//
-// Invariant: floatingSupply + lockedSupply + packsReserve + lpReserve +
-//            availableSupply  <=  maxSupply  (within tolerancePercent)
-//
-// Run alone:
-//   go test ./tests/... -v -run TestSupplySuite/TestSupplyIntegrity
 // ──────────────────────────────────────────────────────────────────────────────
 
 func (s *SupplySuite) TestSupplyIntegrity() {
 	cfg := s.Cfg
-	outDir := filepath.Join(config.Root(), "reports")
-	start := time.Now()
+
+	run := reporter.NewRunner[supplyRow]("Supply Integrity", reporter.NewMeta(
+		cfg.Env, cfg.SpinnerBFFURL, "config_supply.json",
+		"supply", "integrity",
+	))
+	run.Annotate("tolerance", fmt.Sprintf("%.2f%%", s.cfg.TolerancePercent*100))
+	run.Annotate("page", fmt.Sprintf("%d", s.cfg.EventGroupsPage))
+	run.Annotate("limit", fmt.Sprintf("%d", s.cfg.EventGroupsLimit))
 
 	token, err := s.getToken()
 	s.Require().NoError(err)
 
-	// Step 1 — fetch event groups from Spinner BFF.
-	s.T().Logf("Fetching event groups (page=%d limit=%d) …",
-		s.cfg.EventGroupsPage, s.cfg.EventGroupsLimit)
-
-	groups, err := handlers.FetchEventGroups(
-		cfg.SpinnerBFFURL, token,
-		s.cfg.EventGroupsPage, s.cfg.EventGroupsLimit,
-	)
+	// Step 1 — fetch event groups.
+	s.T().Logf("Fetching event groups (page=%d limit=%d) …", s.cfg.EventGroupsPage, s.cfg.EventGroupsLimit)
+	groups, err := handlers.FetchEventGroups(cfg.SpinnerBFFURL, token, s.cfg.EventGroupsPage, s.cfg.EventGroupsLimit)
 	s.Require().NoError(err, "FetchEventGroups failed")
 	s.Require().NotEmpty(groups, "no event groups returned")
-	s.T().Logf("Fetched %d event group(s)", len(groups))
 	s.EventGroups = groups
+	run.Annotate("event_groups_fetched", fmt.Sprintf("%d", len(groups)))
+	s.T().Logf("Fetched %d event group(s)", len(groups))
 
 	ids := make([]string, len(groups))
+	slugByID := make(map[string]string, len(groups))
 	for i, g := range groups {
 		ids[i] = g.ID
+		slugByID[g.ID] = g.Slug
 	}
 
-	// Step 2 — fetch supply breakdowns from Proxy.
+	// Step 2 — fetch supply breakdowns.
 	s.T().Logf("Fetching supply breakdowns for %d event group(s) …", len(ids))
 	breakdowns, err := handlers.FetchSupplyBreakdowns(cfg.ProxyURL, ids)
 	s.Require().NoError(err, "FetchSupplyBreakdowns failed")
 	s.Require().NotEmpty(breakdowns, "no supply data returned")
 	s.Breakdowns = breakdowns
 
-	// Step 3 — assert invariant and build report.
+	// Step 3 — assert invariant.
 	s.T().Logf("Asserting supply integrity (tolerance=%.2f%%) …", s.cfg.TolerancePercent*100)
-
-	rep := reporter.NewSupplyReport(cfg.Env, s.cfg.TolerancePercent*100)
-
 	var failCount int
+
 	for _, b := range breakdowns {
 		total := b.Total()
 		allowedMax := b.MaxSupply * (1 + s.cfg.TolerancePercent)
@@ -105,8 +156,9 @@ func (s *SupplySuite) TestSupplyIntegrity() {
 		overagePct := safePercent(overage, b.MaxSupply)
 		pass := total <= allowedMax
 
-		rep.AddSupplyResult(reporter.SupplyResult{
+		row := supplyRow{
 			EventGroupID:    b.EventGroupID,
+			Slug:            slugByID[b.EventGroupID],
 			MaxSupply:       b.MaxSupply,
 			FloatingSupply:  b.FloatingSupply,
 			LockedSupply:    b.LockedSupply,
@@ -115,50 +167,28 @@ func (s *SupplySuite) TestSupplyIntegrity() {
 			AvailableSupply: b.AvailableSupply,
 			Total:           total,
 			Overage:         overage,
-			OveragePercent:  overagePct,
+			OveragePct:      overagePct,
 			Pass:            pass,
-		})
+		}
+		run.Add(row)
 
 		if !pass {
 			failCount++
-			s.T().Errorf(
-				"FAIL | ID=%-30s | total=%.4f > maxSupply=%.4f | overage=%.4f (%.4f%%)\n"+
-					"      floating=%.4f  locked=%.4f  packsReserve=%.4f  lpReserve=%.4f  available=%.4f",
-				b.EventGroupID, total, b.MaxSupply, overage, overagePct,
-				b.FloatingSupply, b.LockedSupply, b.PacksReserve, b.LpReserve, b.AvailableSupply,
-			)
+			s.T().Errorf("FAIL | ID=%-30s | total=%.4f > max=%.4f | overage=%.4f (%.4f%%)",
+				b.EventGroupID, total, b.MaxSupply, overage, overagePct)
 		} else {
-			s.T().Logf("OK   | ID=%-30s | total=%.4f / maxSupply=%.4f",
+			s.T().Logf("OK   | ID=%-30s | total=%.4f / max=%.4f",
 				b.EventGroupID, total, b.MaxSupply)
 		}
 	}
 
-	rep.FinalizeSupply(time.Since(start))
-
-	if jsonPath, err := rep.WriteSupplyJSON(outDir); err != nil {
-		s.T().Logf("could not write JSON report: %v", err)
-	} else {
-		s.T().Logf("JSON report: %s", jsonPath)
-	}
-
-	if htmlPath, err := rep.WriteSupplyHTML(outDir); err != nil {
-		s.T().Logf("could not write HTML report: %v", err)
-	} else {
-		s.T().Logf("HTML report: %s", htmlPath)
-	}
-
-	s.T().Logf("────────────── SUPPLY INTEGRITY SUMMARY ──────────────")
-	s.T().Logf("Event groups fetched:   %d", len(groups))
-	s.T().Logf("Supply entries checked: %d", rep.Summary.TotalChecked)
-	s.T().Logf("Pass:                   %d", rep.Summary.PassCount)
-	s.T().Logf("Violations:             %d", rep.Summary.FailCount)
-	s.T().Logf("Max overage:            %.4f%%", rep.Summary.MaxOverage)
-	s.T().Logf("Tolerance:              %.2f%%", s.cfg.TolerancePercent*100)
-	s.T().Logf("Wall time:              %d ms", rep.Summary.TotalTimeMs)
-	s.T().Logf("───────────────────────────────────────────────────────")
+	rep := run.Finish()
+	s.writeReport(rep, reportDir())
+	s.storeSuiteReport(rep)
+	s.logSummary(rep)
 
 	if failCount > 0 {
-		s.Fail(fmt.Sprintf("%d supply integrity violation(s) — total exceeds maxSupply", failCount))
+		s.Fail(fmt.Sprintf("%d supply integrity violation(s)", failCount))
 	}
 }
 
@@ -166,7 +196,6 @@ func (s *SupplySuite) TestSupplyIntegrity() {
 // HELPERS
 // ──────────────────────────────────────────────────────────────────────────────
 
-// getToken authenticates the first user in users.json and returns their access token.
 func (s *SupplySuite) getToken() (string, error) {
 	users, err := handlers.LoadUsers(config.DataPath("users.json"))
 	if err != nil || len(users) == 0 {
@@ -179,7 +208,24 @@ func (s *SupplySuite) getToken() (string, error) {
 	return auth.AccessToken, nil
 }
 
-// safePercent returns (part/total)*100, avoiding division by zero.
+func (s *SupplySuite) writeReport(rep *reporter.Report, outDir string) {
+	jsonPath, err := reporter.WriteJSON(rep, outDir)
+	if err != nil {
+		s.T().Logf("report write error: %v", err)
+		return
+	}
+	s.T().Logf("JSON report: %s", jsonPath)
+}
+
+func (s *SupplySuite) logSummary(rep *reporter.Report) {
+	sm := rep.Summary
+	s.T().Logf("────────── %s SUMMARY ──────────", rep.Name)
+	s.T().Logf("Total: %d  Pass: %d  Fail: %d", sm.Total, sm.PassCount, sm.FailCount)
+	s.T().Logf("Success rate: %.1f%%", sm.SuccessRate)
+	s.T().Logf("Wall time: %d ms", sm.WallTimeMs)
+	s.T().Logf("────────────────────────────────────────")
+}
+
 func safePercent(part, total float64) float64 {
 	if total == 0 {
 		return 0

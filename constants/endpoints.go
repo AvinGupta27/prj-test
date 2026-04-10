@@ -13,6 +13,7 @@ const (
 	AuthOTPLogin    = "/auth/otp/login"
 	AuthOTPVerify   = "/auth/otp/verify"
 	AuthSSOGenerate = "/auth/sso/generate"
+	UserWallet      = "/v1/userWallet"
 )
 
 // -------- Spinner BFF Endpoints (continued) --------
