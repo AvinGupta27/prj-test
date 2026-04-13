@@ -1,14 +1,15 @@
 package constants
 
-// -------- Spinner BFF Endpoints --------
+// Spinner BFF endpoints.
 const (
-	PackReveal    = "/api/v1/userpacks/reveal"
-	UserPacksList = "/api/v1/userpacks/"
-	PacksBuy      = "/api/v1/packsmaster/buy"
-	PacksEnriched = "/api/v2/packs/enriched"
+	PackReveal         = "/api/v1/userpacks/reveal"
+	UserPacksList      = "/api/v1/userpacks/"
+	PacksBuy           = "/api/v1/packsmaster/buy"
+	PacksEnriched      = "/api/v2/packs/enriched"
+	EventGroupsFindAll = "/api/v1/eventGroups/findAll"
 )
 
-// -------- FC BFF Auth Endpoints --------
+// FC BFF endpoints.
 const (
 	AuthOTPLogin    = "/auth/otp/login"
 	AuthOTPVerify   = "/auth/otp/verify"
@@ -16,12 +17,8 @@ const (
 	UserWallet      = "/v1/userWallet"
 )
 
-// -------- Spinner BFF Endpoints (continued) --------
-const (
-	EventGroupsFindAll = "/api/v1/eventGroups/findAll"
-)
-
-// -------- Proxy Endpoints --------
+// Proxy endpoints.
 const (
 	EventGroupsSupply = "/superteamUserService/api/v1/events/available-supply"
+	AdminPackCreate   = "/superteamPacksAdminService/api/v2/admin/packs"
 )

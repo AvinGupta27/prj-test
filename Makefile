@@ -11,7 +11,7 @@
 #   make all
 # ──────────────────────────────────────────────────────────────────────────────
 
-.PHONY: all reveal buy-reveal supply build tidy help clean-reports
+.PHONY: all reveal buy-reveal supply create-pack build tidy help clean-reports
 
 # Default: print help
 .DEFAULT_GOAL := help
@@ -32,6 +32,10 @@ packs:
 ## supply: Assert supply integrity — total allocations must not exceed maxSupply
 supply:
 	go test ./tests/supply/... -v -run TestSupplySuite/TestSupplyIntegrity -count=1
+
+## create-pack: Create a randomised pack via the admin proxy API
+create-pack:
+	go test ./tests/pack/... -v -run TestPackSuite/TestCreatePack -count=1
 
 clean-reports:
 	rm -rf reports/*

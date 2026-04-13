@@ -1,0 +1,10 @@
+{
+  "_comment": "Create Pack test config. Edit values here — no code change or commit needed.",
+
+  "packCount": 1,
+  "slotCount": 2,
+  "fmvDistributionCount": 3,
+
+  "eventGroupsPage":  1,
+  "eventGroupsLimit": 200
+}

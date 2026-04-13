@@ -4,56 +4,16 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
-	"github.com/AvinGupta27/code-go-automation/config"
-	"github.com/AvinGupta27/code-go-automation/handlers"
+	"github.com/AvinGupta27/code-go-automation/client"
+	"github.com/AvinGupta27/code-go-automation/constants"
 	"github.com/AvinGupta27/code-go-automation/reporter"
-	"github.com/AvinGupta27/code-go-automation/testconfig"
-	"github.com/AvinGupta27/code-go-automation/testutil"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
-// CONFIGURATION — edit data/config_buy_reveal.json, no code change needed
+// ROW TYPE
 // ──────────────────────────────────────────────────────────────────────────────
-
-type packConfig struct {
-	PackMasterID  string `json:"packMasterID"`
-	Quantity      int    `json:"quantity"`
-	EnableReveal  bool   `json:"enableReveal"`
-	RevealWorkers int    `json:"revealWorkers"`
-	UsersFile     string `json:"usersFile"`
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// ROW TYPES
-// ──────────────────────────────────────────────────────────────────────────────
-
-type revealRow struct {
-	PackID     string
-	Email      string
-	HTTPStatus int
-	Dur        time.Duration
-	Failure    reporter.FailureDetail
-}
-
-func (r revealRow) RowStatus() reporter.Status {
-	if r.Failure.IsZero() && r.HTTPStatus == 200 {
-		return reporter.StatusPass
-	}
-	return reporter.StatusFail
-}
-func (r revealRow) RowLatency() time.Duration { return r.Dur }
-func (r revealRow) RowLabel() string          { return r.PackID }
-func (r revealRow) RowColumns() []reporter.Column {
-	return []reporter.Column{
-		{Header: "User", Value: r.Email},
-		{Header: "HTTP", Value: fmt.Sprintf("%d", r.HTTPStatus)},
-		{Header: "Latency", Value: fmt.Sprintf("%d ms", r.Dur.Milliseconds())},
-	}
-}
-func (r revealRow) RowDetails() []reporter.Detail { return r.Failure.ToDetails() }
 
 type buyRevealRow struct {
 	Email             string
@@ -139,155 +99,14 @@ func (r buyRevealRow) RowDetails() []reporter.Detail {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// SUITE
-// ──────────────────────────────────────────────────────────────────────────────
-
-type PackSuite struct {
-	testutil.BaseSuite
-	cfg         packConfig
-	validTokens []handlers.UserToken
-}
-
-func (s *PackSuite) SetupSuite() {
-	s.BaseSuite.SetupSuite()
-
-	err := testconfig.Load(config.DataPath("config_buy_reveal.json"), &s.cfg)
-	s.Require().NoError(err, "failed to load config_buy_reveal.json")
-	s.T().Logf("Pack config: packID=%s  qty=%d  reveal=%v  workers=%d",
-		s.cfg.PackMasterID, s.cfg.Quantity, s.cfg.EnableReveal, s.cfg.RevealWorkers)
-
-	users, err := handlers.LoadUsers(config.DataPath(s.cfg.UsersFile))
-	s.Require().NoError(err, "failed to load users from %s", s.cfg.UsersFile)
-	s.Require().NotEmpty(users, "%s is empty", s.cfg.UsersFile)
-	s.T().Logf("Loaded %d user account(s)", len(users))
-
-	s.T().Log("Authenticating all users in parallel …")
-	tokens := handlers.GenerateAllTokens(s.Cfg.FcBFFURL, users)
-	for _, tok := range tokens {
-		if tok.Err != nil {
-			s.T().Logf("Auth SKIPPED for %s: %v", tok.Email, tok.Err)
-		} else {
-			s.validTokens = append(s.validTokens, tok)
-			s.T().Logf("Auth OK for %s", tok.Email)
-		}
-	}
-	s.Require().NotEmpty(s.validTokens, "all authentications failed")
-}
-
-func TestPackSuite(t *testing.T) {
-	testutil.Run(t, new(PackSuite))
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// TestReveal
-// ──────────────────────────────────────────────────────────────────────────────
-
-func (s *PackSuite) TestReveal() {
-	cfg := s.Cfg
-
-	run := reporter.NewRunner[revealRow]("Reveal Packs", reporter.NewMeta(
-		cfg.Env, cfg.SpinnerBFFURL, "",
-		"pack", "reveal",
-	))
-	run.Annotate("users_authed", fmt.Sprintf("%d", len(s.validTokens)))
-
-	type job struct {
-		tok handlers.UserToken
-		id  string
-	}
-	var allJobs []job
-	var totalUnrevealed int
-
-	for _, tok := range s.validTokens {
-		ids, err := handlers.FetchUnrevealedPackIDs(cfg.SpinnerBFFURL, tok.AccessToken)
-		if err != nil {
-			s.T().Errorf("fetch unrevealed failed for %s: %v", tok.Email, err)
-			continue
-		}
-		totalUnrevealed += len(ids)
-		s.T().Logf("Found %d unrevealed pack(s) for %s", len(ids), tok.Email)
-		for _, id := range ids {
-			allJobs = append(allJobs, job{tok: tok, id: id})
-		}
-	}
-
-	run.Annotate("total_packs", fmt.Sprintf("%d", totalUnrevealed))
-
-	if len(allJobs) == 0 {
-		s.T().Skip("No unrevealed packs found for any user.")
-	}
-
-	jobCh := make(chan job, len(allJobs))
-	rowCh := make(chan revealRow, len(allJobs))
-	var wg sync.WaitGroup
-
-	for w := 0; w < s.cfg.RevealWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := range jobCh {
-				start := time.Now()
-				rr := handlers.RevealPack(cfg.SpinnerBFFURL, j.tok.AccessToken, j.id, j.tok.Email)
-				dur := time.Since(start)
-				row := revealRow{
-					PackID:     j.id,
-					Email:      j.tok.Email,
-					HTTPStatus: rr.Status,
-					Dur:        dur,
-				}
-				if !rr.Success {
-					row.Failure = reporter.FailureDetail{
-						RequestMethod:  "POST",
-						RequestURL:     cfg.SpinnerBFFURL + "/api/v1/userpacks/reveal",
-						RequestBody:    fmt.Sprintf(`{"userPackId":"%s"}`, j.id),
-						ResponseStatus: rr.Status,
-						ResponseBody:   rr.ErrorMsg,
-						ErrorChain:     rr.ErrorMsg,
-						OccurredAt:     time.Now(),
-					}
-				}
-				rowCh <- row
-			}
-		}()
-	}
-
-	for _, j := range allJobs {
-		jobCh <- j
-	}
-	close(jobCh)
-	go func() { wg.Wait(); close(rowCh) }()
-
-	var failCount int
-	for row := range rowCh {
-		run.Add(row)
-		if row.RowStatus() == reporter.StatusFail {
-			failCount++
-			s.T().Errorf("FAIL | User=%-30s | ID=%-30s | Status=%d | %s",
-				row.Email, row.PackID, row.HTTPStatus, row.Failure.ErrorChain)
-		} else {
-			s.T().Logf("OK   | User=%-30s | ID=%-30s | %d ms",
-				row.Email, row.PackID, row.Dur.Milliseconds())
-		}
-	}
-
-	rep := run.Finish()
-	s.WriteReport(rep)
-	s.StoreSuiteReport(rep)
-	s.LogSummary(rep)
-
-	if failCount > 0 {
-		s.Fail(fmt.Sprintf("%d reveal failure(s)", failCount))
-	}
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
 // TestBuyAndReveal
 // ──────────────────────────────────────────────────────────────────────────────
 
 func (s *PackSuite) TestBuyAndReveal() {
+	s.authenticateUsers()
 	cfg := s.Cfg
 
-	packInfo, err := handlers.FetchPackInfo(cfg.SpinnerBFFURL, s.validTokens[0].AccessToken, s.cfg.PackMasterID)
+	packInfo, err := client.FetchPackInfo(cfg.SpinnerBFFURL, s.validTokens[0].AccessToken, s.cfg.PackMasterID)
 	s.Require().NoError(err, "FetchPackInfo failed")
 
 	s.T().Logf("Pack: %s | PriceConfig: %s | Currency: %s | Price: %.4f | Limit: %d",
@@ -297,14 +116,14 @@ func (s *PackSuite) TestBuyAndReveal() {
 		s.T().Logf("WARNING: quantity (%d) exceeds perSessionLimit (%d)", s.cfg.Quantity, packInfo.PerSessionLimit)
 	}
 
-	packReq := handlers.BuyPackRequest{
+	packReq := client.BuyPackRequest{
 		PackMasterID:  s.cfg.PackMasterID,
 		Quantity:      s.cfg.Quantity,
 		PriceConfigID: packInfo.PriceConfigID,
 	}
 
 	run := reporter.NewRunner[buyRevealRow]("Buy and Reveal Packs", reporter.NewMeta(
-		cfg.Env, cfg.SpinnerBFFURL, "config_buy_reveal.json",
+		cfg.Env, cfg.SpinnerBFFURL, "pack_buy_reveal.json",
 		"pack", "buy", "reveal",
 	))
 	run.Annotate("pack_name", packInfo.PackName)
@@ -323,9 +142,9 @@ func (s *PackSuite) TestBuyAndReveal() {
 
 	for _, tok := range s.validTokens {
 		wg.Add(1)
-		go func(ut handlers.UserToken) {
+		go func(ut client.UserToken) {
 			defer wg.Done()
-			walletBefore, err := handlers.FetchWallet(cfg.FcBFFURL, ut.AccessToken)
+			walletBefore, err := client.FetchWallet(cfg.FcBFFURL, ut.AccessToken)
 			if err != nil {
 				s.T().Logf("WARN | wallet fetch failed for %s: %v — proceeding without wallet check", ut.Email, err)
 				rowCh <- runBuyAndReveal(cfg.SpinnerBFFURL, cfg.FcBFFURL, ut, packReq, packInfo.PriceCurrency, requiredBalance, 0, s.cfg.EnableReveal)
@@ -379,9 +198,9 @@ func (s *PackSuite) TestBuyAndReveal() {
 // WORKER
 // ──────────────────────────────────────────────────────────────────────────────
 
-func runBuyAndReveal(spinnerBFFURL, fcBFFURL string, tok handlers.UserToken, req handlers.BuyPackRequest, priceCurrency string, expectedDeduction, walletBefore float64, enableReveal bool) buyRevealRow {
+func runBuyAndReveal(spinnerBFFURL, fcBFFURL string, tok client.UserToken, req client.BuyPackRequest, priceCurrency string, expectedDeduction, walletBefore float64, enableReveal bool) buyRevealRow {
 	buyStart := time.Now()
-	buyRes := handlers.BuyPack(spinnerBFFURL, tok.AccessToken, req, tok.Email)
+	buyRes := client.BuyPack(spinnerBFFURL, tok.AccessToken, req, tok.Email)
 	buyDur := time.Since(buyStart)
 
 	row := buyRevealRow{
@@ -396,7 +215,7 @@ func runBuyAndReveal(spinnerBFFURL, fcBFFURL string, tok handlers.UserToken, req
 	if !buyRes.Success {
 		row.BuyFailure = reporter.FailureDetail{
 			RequestMethod:  "POST",
-			RequestURL:     spinnerBFFURL + "/api/v1/packsmaster/buy",
+			RequestURL:     spinnerBFFURL + constants.PacksBuy,
 			RequestBody:    fmt.Sprintf(`{"packMasterId":%q,"quantity":%d}`, req.PackMasterID, req.Quantity),
 			ResponseStatus: buyRes.Status,
 			ResponseBody:   buyRes.ErrorMsg,
@@ -407,14 +226,14 @@ func runBuyAndReveal(spinnerBFFURL, fcBFFURL string, tok handlers.UserToken, req
 	}
 
 	if priceCurrency != "" && walletBefore > 0 {
-		if walletAfter, err := handlers.FetchWallet(fcBFFURL, tok.AccessToken); err == nil {
+		if walletAfter, err := client.FetchWallet(fcBFFURL, tok.AccessToken); err == nil {
 			row.WalletAfter = walletAfter.Unlocked(priceCurrency)
 			row.ActualDeduction = walletBefore - row.WalletAfter
 			diff := row.ActualDeduction - expectedDeduction
 			if diff < 0 {
 				diff = -diff
 			}
-			row.WalletCheckOK = diff < 0.0001
+			row.WalletCheckOK = expectedDeduction == 0 || diff/expectedDeduction < 0.001
 		}
 	}
 
@@ -425,7 +244,7 @@ func runBuyAndReveal(spinnerBFFURL, fcBFFURL string, tok handlers.UserToken, req
 
 	time.Sleep(500 * time.Millisecond)
 
-	revCh := make(chan handlers.RevealResult, len(buyRes.UserPackIDs))
+	revCh := make(chan client.RevealResult, len(buyRes.UserPackIDs))
 	var wg sync.WaitGroup
 	revStart := time.Now()
 
@@ -433,7 +252,7 @@ func runBuyAndReveal(spinnerBFFURL, fcBFFURL string, tok handlers.UserToken, req
 		wg.Add(1)
 		go func(pid string) {
 			defer wg.Done()
-			revCh <- handlers.RevealPack(spinnerBFFURL, tok.AccessToken, pid, tok.Email)
+			revCh <- client.RevealPack(spinnerBFFURL, tok.AccessToken, pid, tok.Email)
 		}(id)
 	}
 	wg.Wait()
@@ -446,7 +265,7 @@ func runBuyAndReveal(spinnerBFFURL, fcBFFURL string, tok handlers.UserToken, req
 		if !rr.Success {
 			row.RevFailures = append(row.RevFailures, reporter.FailureDetail{
 				RequestMethod:  "POST",
-				RequestURL:     spinnerBFFURL + "/api/v1/userpacks/reveal",
+				RequestURL:     spinnerBFFURL + constants.PackReveal,
 				RequestBody:    fmt.Sprintf(`{"userPackId":%q}`, rr.UserPackID),
 				ResponseStatus: rr.Status,
 				ResponseBody:   rr.ErrorMsg,

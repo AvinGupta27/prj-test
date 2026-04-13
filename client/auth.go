@@ -1,22 +1,13 @@
-package handlers
+package client
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"sync"
+	"time"
 
 	"github.com/AvinGupta27/code-go-automation/constants"
 	"github.com/go-resty/resty/v2"
 )
-
-// -------- TYPES --------
-
-// UserCred holds one test account's credentials.
-type UserCred struct {
-	Email string `json:"email"`
-	OTP   string `json:"otp"`
-}
 
 // AuthToken holds all tokens generated for a single user.
 type AuthToken struct {
@@ -52,11 +43,11 @@ type ssoResponse struct {
 
 // GenerateTokens authenticates a single user credential and returns an AuthToken.
 func GenerateTokens(fcBFFURL string, cred UserCred) (AuthToken, error) {
-	client := resty.New()
+	c := resty.New().SetTimeout(15 * time.Second)
 
 	// Step 1: OTP Login
 	var loginResp loginResponse
-	resp, err := client.R().
+	resp, err := c.R().
 		SetHeader("Content-Type", "application/json").
 		SetBody(map[string]string{"email": cred.Email}).
 		SetResult(&loginResp).
@@ -70,7 +61,7 @@ func GenerateTokens(fcBFFURL string, cred UserCred) (AuthToken, error) {
 
 	// Step 2: OTP Verify
 	var verifyResp verifyResponse
-	resp, err = client.R().
+	resp, err = c.R().
 		SetHeader("Content-Type", "application/json").
 		SetBody(map[string]string{"email": cred.Email, "otp": cred.OTP}).
 		SetResult(&verifyResp).
@@ -84,8 +75,9 @@ func GenerateTokens(fcBFFURL string, cred UserCred) (AuthToken, error) {
 	accessToken := verifyResp.Data.AccessToken
 
 	// Step 3: SSO Generate
+	// Service requires lowercase "access_token" header, not Authorization.
 	var ssoResp ssoResponse
-	resp, err = client.R().
+	resp, err = c.R().
 		SetHeader("access_token", accessToken).
 		SetResult(&ssoResp).
 		Post(fcBFFURL + constants.AuthSSOGenerate)
@@ -101,19 +93,6 @@ func GenerateTokens(fcBFFURL string, cred UserCred) (AuthToken, error) {
 		AccessToken: accessToken,
 		SSOToken:    ssoResp.Data.SSOToken,
 	}, nil
-}
-
-// LoadUsers reads a JSON array of UserCred from the given file path.
-func LoadUsers(path string) ([]UserCred, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var users []UserCred
-	if err := json.Unmarshal(b, &users); err != nil {
-		return nil, err
-	}
-	return users, nil
 }
 
 // GenerateAllTokens authenticates all users in parallel and returns a UserToken per user.

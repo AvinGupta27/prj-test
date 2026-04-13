@@ -1,10 +1,12 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -46,19 +48,38 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: ENV is not set in .env")
 	}
 
+	// URLs in .env use %s as a placeholder for the environment name.
+	// e.g. "https://bff.%s.munna-bhai.xyz" → "https://bff.preprod.munna-bhai.xyz"
+	sub := func(key string) string {
+		return strings.ReplaceAll(os.Getenv(key), "%s", env)
+	}
+
 	cfg := &Config{
 		Env:           env,
-		SpinnerBFFURL: fmt.Sprintf(os.Getenv("SPINNER_BFF_BASE_URL"), env),
-		FcBFFURL:      fmt.Sprintf(os.Getenv("FC_BFF_BASE_URL"), env),
-		FrontendURL:   fmt.Sprintf(os.Getenv("FRONTEND_BASE_URL"), env),
-		ProxyURL:      fmt.Sprintf(os.Getenv("PROXY_URL"), env),
+		SpinnerBFFURL: sub("SPINNER_BFF_BASE_URL"),
+		FcBFFURL:      sub("FC_BFF_BASE_URL"),
+		FrontendURL:   sub("FRONTEND_BASE_URL"),
+		ProxyURL:      sub("PROXY_URL"),
 	}
 
 	return cfg, nil
 }
 
 // DataPath returns the absolute path to a file inside the project's data/ directory.
-// Example: config.DataPath("ids.json") → <root>/data/ids.json
+// Example: config.DataPath("pack_buy_reveal.json") → <root>/data/pack_buy_reveal.json
 func DataPath(filename string) string {
 	return filepath.Join(projectRoot(), "data", filename)
+}
+
+// LoadJSON reads the JSON file at path and unmarshals it into dst.
+// dst must be a pointer to a struct.
+func LoadJSON(path string, dst any) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("config: read %s: %w", path, err)
+	}
+	if err := json.Unmarshal(b, dst); err != nil {
+		return fmt.Errorf("config: parse %s: %w", path, err)
+	}
+	return nil
 }

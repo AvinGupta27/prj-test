@@ -5,15 +5,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AvinGupta27/code-go-automation/client"
 	"github.com/AvinGupta27/code-go-automation/config"
-	"github.com/AvinGupta27/code-go-automation/handlers"
 	"github.com/AvinGupta27/code-go-automation/reporter"
-	"github.com/AvinGupta27/code-go-automation/testconfig"
-	"github.com/AvinGupta27/code-go-automation/testutil"
+	"github.com/AvinGupta27/code-go-automation/suite"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
-// CONFIG — edit data/config_supply.json, no code change needed
+// CONFIG — edit data/supply.json, no code change needed
 // ──────────────────────────────────────────────────────────────────────────────
 
 type supplyConfig struct {
@@ -85,22 +84,22 @@ func (r supplyRow) RowDetails() []reporter.Detail {
 // ──────────────────────────────────────────────────────────────────────────────
 
 type SupplySuite struct {
-	testutil.BaseSuite
+	suite.BaseSuite
 	cfg supplyConfig
 
 	// Shared outputs for downstream dependent tests.
-	EventGroups []handlers.EventGroup
-	Breakdowns  []handlers.SupplyBreakdown
+	EventGroups []client.EventGroup
+	Breakdowns  []client.SupplyBreakdown
 }
 
 func TestSupplySuite(t *testing.T) {
-	testutil.Run(t, new(SupplySuite))
+	suite.Run(t, new(SupplySuite))
 }
 
 func (s *SupplySuite) SetupSuite() {
 	s.BaseSuite.SetupSuite()
-	err := testconfig.Load(config.DataPath("config_supply.json"), &s.cfg)
-	s.Require().NoError(err, "failed to load config_supply.json")
+	err := config.LoadJSON(config.DataPath("supply.json"), &s.cfg)
+	s.Require().NoError(err, "failed to load supply.json")
 	s.T().Logf("Supply config: page=%d  limit=%d  tolerance=%.2f%%",
 		s.cfg.EventGroupsPage, s.cfg.EventGroupsLimit, s.cfg.TolerancePercent*100)
 }
@@ -113,7 +112,7 @@ func (s *SupplySuite) TestSupplyIntegrity() {
 	cfg := s.Cfg
 
 	run := reporter.NewRunner[supplyRow]("Supply Integrity", reporter.NewMeta(
-		cfg.Env, cfg.SpinnerBFFURL, "config_supply.json",
+		cfg.Env, cfg.SpinnerBFFURL, "supply.json",
 		"supply", "integrity",
 	))
 	run.Annotate("tolerance", fmt.Sprintf("%.2f%%", s.cfg.TolerancePercent*100))
@@ -124,7 +123,7 @@ func (s *SupplySuite) TestSupplyIntegrity() {
 	s.Require().NoError(err)
 
 	s.T().Logf("Fetching event groups (page=%d limit=%d) …", s.cfg.EventGroupsPage, s.cfg.EventGroupsLimit)
-	groups, err := handlers.FetchEventGroups(cfg.SpinnerBFFURL, token, s.cfg.EventGroupsPage, s.cfg.EventGroupsLimit)
+	groups, err := client.FetchEventGroups(cfg.SpinnerBFFURL, token, s.cfg.EventGroupsPage, s.cfg.EventGroupsLimit)
 	s.Require().NoError(err, "FetchEventGroups failed")
 	s.Require().NotEmpty(groups, "no event groups returned")
 	s.EventGroups = groups
@@ -139,7 +138,7 @@ func (s *SupplySuite) TestSupplyIntegrity() {
 	}
 
 	s.T().Logf("Fetching supply breakdowns for %d event group(s) …", len(ids))
-	breakdowns, err := handlers.FetchSupplyBreakdowns(cfg.ProxyURL, ids)
+	breakdowns, err := client.FetchSupplyBreakdowns(cfg.ProxyURL, ids)
 	s.Require().NoError(err, "FetchSupplyBreakdowns failed")
 	s.Require().NotEmpty(breakdowns, "no supply data returned")
 	s.Breakdowns = breakdowns
@@ -194,11 +193,11 @@ func (s *SupplySuite) TestSupplyIntegrity() {
 // ──────────────────────────────────────────────────────────────────────────────
 
 func (s *SupplySuite) getToken() (string, error) {
-	users, err := handlers.LoadUsers(config.DataPath("users.json"))
+	users, err := client.LoadUsers(config.DataPath("users.json"))
 	if err != nil || len(users) == 0 {
 		return "", fmt.Errorf("getToken: could not load users.json: %w", err)
 	}
-	auth, err := handlers.GenerateTokens(s.Cfg.FcBFFURL, users[0])
+	auth, err := client.GenerateTokens(s.Cfg.FcBFFURL, users[0])
 	if err != nil {
 		return "", fmt.Errorf("getToken: auth failed for %s: %w", users[0].Email, err)
 	}

@@ -1,4 +1,4 @@
-package handlers
+package client
 
 import (
 	"fmt"
@@ -47,13 +47,11 @@ type walletResponse struct {
 // -------- PUBLIC API --------
 
 // FetchWallet fetches the user's wallet and returns a WalletBalance map.
-// fcBFFURL: e.g. "https://bff.preprod.munna-bhai.xyz"
-// token:    x_auth_token (access token)
 func FetchWallet(fcBFFURL, token string) (WalletBalance, error) {
-	client := resty.New().SetTimeout(10 * time.Second)
+	c := resty.New().SetTimeout(10 * time.Second)
 
 	var resp walletResponse
-	r, err := client.R().
+	r, err := c.R().
 		SetHeader("x_auth_token", token).
 		SetHeader("source", "WEB").
 		SetResult(&resp).

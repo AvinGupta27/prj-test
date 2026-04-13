@@ -1,6 +1,6 @@
-// Package testutil provides the shared BaseSuite foundation for all test suites.
+// Package suite provides the shared BaseSuite foundation for all test suites.
 // Every domain test package imports this and embeds BaseSuite.
-package testutil
+package suite
 
 import (
 	"path/filepath"

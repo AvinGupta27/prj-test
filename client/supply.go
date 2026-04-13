@@ -1,4 +1,4 @@
-package handlers
+package client
 
 import (
 	"encoding/json"
@@ -21,12 +21,12 @@ type EventGroup struct {
 
 // SupplyBreakdown holds the supply figures for a single event group.
 type SupplyBreakdown struct {
-	EventGroupID   string
-	MaxSupply      float64
-	FloatingSupply float64
-	LockedSupply   float64
-	PacksReserve   float64
-	LpReserve      float64
+	EventGroupID    string
+	MaxSupply       float64
+	FloatingSupply  float64
+	LockedSupply    float64
+	PacksReserve    float64
+	LpReserve       float64
 	AvailableSupply float64
 }
 
@@ -61,13 +61,11 @@ type supplyEntry struct {
 // -------- PUBLIC API --------
 
 // FetchEventGroups fetches all event groups from the Spinner BFF findAll endpoint.
-// spinnerBFFURL: e.g. "https://spinnerbff.preprod.munna-bhai.xyz"
-// token:         bearer access token
 func FetchEventGroups(spinnerBFFURL, token string, page, limit int) ([]EventGroup, error) {
-	client := resty.New().SetTimeout(15 * time.Second)
+	c := resty.New().SetTimeout(15 * time.Second)
 
 	var resp eventGroupsResponse
-	r, err := client.R().
+	r, err := c.R().
 		SetHeader("Authorization", token).
 		SetQueryParams(map[string]string{
 			"page":  fmt.Sprintf("%d", page),
@@ -85,12 +83,13 @@ func FetchEventGroups(spinnerBFFURL, token string, page, limit int) ([]EventGrou
 	return resp.Data, nil
 }
 
+// FetchSupplyBreakdowns fetches supply breakdown data for a batch of event group IDs.
 func FetchSupplyBreakdowns(proxyURL string, ids []string) ([]SupplyBreakdown, error) {
 	if len(ids) == 0 {
-		return nil, nil
+		return []SupplyBreakdown{}, nil
 	}
 
-	client := resty.New().SetTimeout(30 * time.Second)
+	c := resty.New().SetTimeout(30 * time.Second)
 
 	body, err := json.Marshal(map[string][]string{"eventIds": ids})
 	if err != nil {
@@ -98,7 +97,7 @@ func FetchSupplyBreakdowns(proxyURL string, ids []string) ([]SupplyBreakdown, er
 	}
 
 	var resp supplyResponse
-	r, err := client.R().
+	r, err := c.R().
 		SetHeader("Content-Type", "application/json").
 		SetBody(string(body)).
 		SetResult(&resp).
