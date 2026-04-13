@@ -1,6 +1,6 @@
 # code-go-automation
 
-Go-based API test automation suite for the FanCraze pack/NFT platform. Tests authenticate multiple users in parallel, exercise pack buying and revealing flows, and assert supply integrity invariants — producing timestamped JSON and HTML reports for every run.
+Go-based API test automation suite for the FanCraze pack/NFT platform. Tests authenticate multiple users in parallel, exercise pack buying and revealing flows, validate wallet deductions, and assert supply integrity invariants — producing timestamped JSON and combined HTML reports for every run.
 
 ---
 
@@ -23,28 +23,39 @@ Go-based API test automation suite for the FanCraze pack/NFT platform. Tests aut
 ```
 code-go-automation/
 ├── config/
-│   └── config.go            # Env config loaded from .env
+│   └── config.go                  # Env config loaded from .env
 ├── constants/
-│   └── endpoints.go         # API endpoint path constants
+│   └── endpoints.go               # All API endpoint path constants
 ├── data/
-│   ├── users.json           # Test user credentials
-│   └── config_supply.json   # Runtime config for supply test
+│   ├── users.json                 # Test user credentials
+│   ├── config_buy_reveal.json     # Runtime config for pack buy+reveal test
+│   └── config_supply.json         # Runtime config for supply integrity test
 ├── handlers/
-│   ├── auth.go              # OTP login + SSO token generation
-│   ├── buy_pack.go          # Buy packs + reveal NFTs
-│   ├── fetch_packs.go       # Fetch unrevealed pack IDs
-│   ├── fetch_enriched.go    # Resolve pack config at runtime
-│   └── supply.go            # Fetch event groups + supply breakdowns
+│   ├── auth.go                    # OTP login + SSO token generation
+│   ├── buy_pack.go                # Buy packs + reveal NFTs
+│   ├── fetch_enriched.go          # Resolve pack config from enriched API
+│   ├── fetch_packs.go             # Fetch unrevealed pack IDs (paginated)
+│   ├── supply.go                  # Fetch event groups + supply breakdowns
+│   └── wallet.go                  # Fetch user wallet balances
 ├── reporter/
-│   └── reporter.go          # JSON + HTML report generation
+│   ├── row.go                     # Row interface, Column, Detail, FailureDetail, Status
+│   ├── meta.go                    # RunMeta: git info, env, tags, timestamps
+│   ├── stats.go                   # Latency stats: p50/p95/p99, histogram
+│   ├── runner.go                  # Generic Runner[R Row]: Add, Annotate, Finish, WriteJSON
+│   ├── writers.go                 # writeJSON + writeHTML (universal template)
+│   └── suite.go                   # WriteRunHTML: combined run report across all tests
 ├── testconfig/
-│   └── loader.go            # Generic JSON config loader
+│   └── loader.go                  # Generic JSON config file loader
+├── testutil/
+│   └── suite.go                   # BaseSuite: shared lifecycle, WriteReport, LogSummary
 ├── tests/
-│   ├── suite_test.go        # BaseSuite: config load + lifecycle hooks
-│   ├── pack_test.go         # PackSuite: reveal + buy-and-reveal tests
-│   └── supply_test.go       # SupplySuite: supply integrity test
-├── reports/                 # Generated — JSON + HTML reports per run
-├── .env                     # Environment variables (not committed)
+│   ├── pack/
+│   │   └── pack_test.go           # PackSuite: TestReveal + TestBuyAndReveal
+│   └── supply/
+│       └── supply_test.go         # SupplySuite: TestSupplyIntegrity
+├── reports/                       # Generated — JSON + HTML reports per run
+├── .env                           # Environment variables (not committed)
+├── Makefile                       # Test runner shortcuts
 └── go.mod
 ```
 
@@ -59,7 +70,7 @@ code-go-automation/
 
 ## Configuration
 
-Create a `.env` file at the project root:
+### `.env`
 
 ```env
 ENV=preprod
@@ -70,7 +81,7 @@ FRONTEND_BASE_URL=https://frontend.%s.munna-bhai.xyz
 PROXY_URL=https://proxy.%s.munna-bhai.xyz/proxy
 ```
 
-`%s` is replaced with the value of `ENV` at load time. To target `prod`:
+`%s` is replaced with `ENV` at load time. Switch to prod:
 
 ```env
 ENV=prod
@@ -80,7 +91,7 @@ FRONTEND_BASE_URL=https://fancraze.com
 PROXY_URL=https://proxy.fancraze.com/proxy
 ```
 
-No code change or commit is needed to switch environments — edit `.env` and re-run.
+No code change needed — edit `.env` and re-run.
 
 ---
 
@@ -88,7 +99,7 @@ No code change or commit is needed to switch environments — edit `.env` and re
 
 ### `data/users.json`
 
-Array of test accounts. All suites authenticate these users in parallel before running tests.
+Array of test accounts. All suites authenticate these users in parallel before running.
 
 ```json
 [
@@ -97,109 +108,151 @@ Array of test accounts. All suites authenticate these users in parallel before r
 ]
 ```
 
-Authentication failures for individual users are logged as warnings and skipped — they do not fail the suite. The suite only fails if **all** users fail authentication.
+Individual auth failures are logged and skipped. The suite aborts only if **all** users fail.
 
-### `data/config_supply.json`
+---
 
-Runtime configuration for the supply integrity test. Edit this file and re-run — no code change needed.
+### `data/config_buy_reveal.json`
+
+Runtime config for the pack buy+reveal test. Edit and re-run — no code change needed.
 
 ```json
 {
-  "eventGroupsPage": 1,
-  "eventGroupsLimit": 200,
-  "tolerancePercent": 0.01
+  "packMasterID":  "69ce3ade5f131ce16676c7b7",
+  "quantity":      2,
+  "enableReveal":  false,
+  "revealWorkers": 10,
+  "usersFile":     "users.json"
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `eventGroupsPage` | int | Page number to fetch from the event groups API |
-| `eventGroupsLimit` | int | Number of event groups to fetch per page |
-| `tolerancePercent` | float64 | Allowed overage as a fraction (0.01 = 1%, 0 = strict) |
+| `packMasterID` | string | Pack master ID to buy |
+| `quantity` | int | Packs to buy per user per run |
+| `enableReveal` | bool | Whether to reveal packs after buying |
+| `revealWorkers` | int | Concurrent goroutines in the reveal worker pool |
+| `usersFile` | string | Filename inside `data/` to load users from |
+
+---
+
+### `data/config_supply.json`
+
+Runtime config for the supply integrity test.
+
+```json
+{
+  "eventGroupsPage":  1,
+  "eventGroupsLimit": 200,
+  "tolerancePercent": 0.00
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `eventGroupsPage` | int | Page to fetch from the event groups API |
+| `eventGroupsLimit` | int | Event groups per page |
+| `tolerancePercent` | float64 | Allowed overage fraction (0 = strict, 0.01 = 1%) |
 
 ---
 
 ## Running Tests
 
+### Using Make (recommended)
+
+```bash
+make reveal        # Reveal all unrevealed packs for every user
+make buy-reveal    # Buy packs then reveal for every user
+make packs         # Run both reveal and buy-reveal
+make supply        # Supply integrity check
+make all           # Run every test suite
+make clean-reports # Delete all generated reports
+make build         # Compile check only
+make tidy          # go mod tidy + verify
+```
+
+### Using go test directly
+
 ```bash
 # All suites
-go test ./tests/... -v
+go test ./tests/... -v -count=1
 
-# Pack suite only (both reveal and buy+reveal)
-go test ./tests/... -v -run TestPackSuite
+# Pack suite — both tests
+go test ./tests/pack/... -v -count=1
 
-# Reveal only (no buy)
-go test ./tests/... -v -run TestPackSuite/TestReveal
-
-# Buy and reveal
-go test ./tests/... -v -run TestPackSuite/TestBuyAndReveal
-
-# Supply integrity only
-go test ./tests/... -v -run TestSupplySuite/TestSupplyIntegrity
+# Specific tests
+go test ./tests/pack/...   -v -run TestPackSuite/TestReveal          -count=1
+go test ./tests/pack/...   -v -run TestPackSuite/TestBuyAndReveal     -count=1
+go test ./tests/supply/... -v -run TestSupplySuite/TestSupplyIntegrity -count=1
 ```
 
 ---
 
 ## Test Suites
 
-### BaseSuite (`tests/suite_test.go`)
+### BaseSuite (`testutil/suite.go`)
 
-Shared foundation embedded by every suite. Runs once per suite:
+Shared foundation embedded by every suite. Provides:
 
-| Hook | When | What it does |
+| Method | When | Purpose |
 |---|---|---|
-| `SetupSuite` | Before all tests | Loads `.env` → `*config.Config` |
-| `SetupTest` | Before each test | Logs test name |
-| `TearDownTest` | After each test | Logs test name |
-| `TearDownSuite` | After all tests | Logs completion |
+| `SetupSuite()` | Once before all tests | Loads `.env` → `*config.Config` |
+| `SetupTest()` | Before each test | Logs test name |
+| `TearDownTest()` | After each test | Logs test name |
+| `TearDownSuite()` | Once after all tests | Writes combined `run_<ts>.html` |
+| `WriteReport(rep)` | End of each Test* | Writes per-test JSON to `reports/` |
+| `LogSummary(rep)` | End of each Test* | Logs total/pass/fail/latency to test output |
+| `StoreSuiteReport(rep)` | End of each Test* | Queues report for the combined HTML |
 
 ---
 
-### PackSuite (`tests/pack_test.go`)
+### PackSuite (`tests/pack/pack_test.go`)
 
-Authenticates all users in `SetupSuite` (once, shared by both tests).
+Config: `data/config_buy_reveal.json`  
+Auth: all users from `usersFile`, authenticated once in `SetupSuite`
 
 #### `TestReveal`
 
-For every authenticated user, fetches their unrevealed packs and reveals them via a shared worker pool.
+Fetches every user's unrevealed packs and reveals them via a bounded worker pool.
 
 **Flow:**
-1. Fetch unrevealed pack IDs for each user (`UNREVEALED` status, paginated)
-2. Feed all `(token, packID)` pairs into a channel
-3. 5 concurrent workers pull from the channel and call the reveal API
-4. Aggregate results → generate report
+1. For each user → fetch all unrevealed pack IDs (paginated)
+2. Feed all `(token, packID)` pairs into a buffered job channel
+3. `revealWorkers` concurrent goroutines pull and call reveal API
+4. Collect results → build report
 
-**Configurable via constants in `pack_test.go`:**
-
-| Constant | Default | Description |
-|---|---|---|
-| `revealWorkers` | `5` | Number of concurrent reveal goroutines |
+**Skips** if no unrevealed packs exist for any user.
 
 #### `TestBuyAndReveal`
 
-For every authenticated user, buys N packs then reveals all returned pack IDs.
+For each user: check wallet balance → buy packs → verify wallet deduction → optionally reveal.
 
 **Flow:**
-1. Resolve `priceConfigId` dynamically from the enriched API (one call)
-2. Launch one goroutine per user
-3. Each goroutine: `BuyPack` → wait 500ms → reveal all returned pack IDs concurrently
-4. Aggregate NFT counts, values, latencies → generate report
+1. Resolve `priceConfigId` dynamically from enriched API (uses `SOURCE: WEB` header)
+2. For each user in parallel:
+   - Fetch wallet balance (`/v1/userWallet`)
+   - **Skip** user if `unlockedBalance < price × quantity`
+   - Buy packs
+   - Fetch wallet after buy → assert deduction within 0.0001 tolerance
+   - Reveal all returned pack IDs concurrently (if `enableReveal: true`)
+3. Collect results → build report
 
-**Configurable via constants in `pack_test.go`:**
-
-| Constant | Default | Description |
-|---|---|---|
-| `buyPackMasterID` | `"69c378ce93725fbf11f5c183"` | Pack master ID to buy |
-| `buyQuantity` | `10` | Number of packs to buy per user |
-| `enableReveal` | `true` | Whether to reveal after buying |
+**Row statuses:**
+- `PASS` — buy succeeded + wallet deduction matched
+- `SKIP` — insufficient balance
+- `WARN` — buy succeeded but wallet deduction didn't match expected
+- `FAIL` — buy or reveal API error
 
 ---
 
-### SupplySuite (`tests/supply_test.go`)
+### SupplySuite (`tests/supply/supply_test.go`)
+
+Config: `data/config_supply.json`  
+Auth: first user in `users.json` (supply API only needs one token)
 
 #### `TestSupplyIntegrity`
 
-Validates the core supply invariant: no event group's allocated components may exceed its `maxSupply`.
+Validates that no event group's allocated supply exceeds its maximum.
 
 **Invariant:**
 ```
@@ -207,103 +260,155 @@ floatingSupply + lockedSupply + packsReserve + lpReserve + availableSupply <= ma
 ```
 
 **Flow:**
-1. Authenticate one user (first in `users.json`)
-2. Fetch all event groups from Spinner BFF (`/api/v1/eventGroups/findAll`)
-3. Fetch supply breakdowns for all IDs from Proxy in one request
-4. Assert invariant for each event group (with tolerance from config)
-5. Generate supply report
+1. Fetch event groups from Spinner BFF (paginated)
+2. Batch-fetch supply breakdowns from Proxy
+3. Assert invariant per event group (with tolerance)
+4. Build report — table label is `slug`, details show `eventGroupID`
 
-**Configurable via `data/config_supply.json`** (no code change needed).
+Stores `s.EventGroups` and `s.Breakdowns` for downstream dependent tests.
 
 ---
 
 ## Reports
 
-Every test run writes two files to `reports/`:
+Every run produces:
 
-| Suite | JSON | HTML |
-|---|---|---|
-| `TestReveal` | `reveal_<timestamp>.json` | `reveal_<timestamp>.html` |
-| `TestBuyAndReveal` | `buy_reveal_<timestamp>.json` | `buy_reveal_<timestamp>.html` |
-| `TestSupplyIntegrity` | `supply_<timestamp>.json` | `supply_<timestamp>.html` |
+| File | Contents |
+|---|---|
+| `<test-name>_<timestamp>.json` | Full JSON: metadata, summary, all rows with details |
+| `run_<timestamp>.html` | Combined dark-theme HTML with all tests for that run |
 
-HTML reports are self-contained (no external dependencies) and include:
-- Summary metric cards (totals, success rate, latency, wall time)
-- Per-item result table with pass/fail badges
-- Dark theme with monospace IDs for readability
+### HTML report sections
+
+- **Run header** — env, git branch, commit, timestamp, overall pass/fail badge
+- **Overview cards** — total tests, total items, total failures
+- **Per-test summary strip** — pass rate, p95 latency, wall time, annotations
+- **Detail sections** (collapsible per test):
+  - Annotations (key-value run context)
+  - Latency histogram (5 buckets) + p50/p95/p99/min/max pills
+  - Result table with expandable rows
+  - **Failed rows auto-expand** on page load
+  - Each expanded row shows: request URL, body, response body, error chain, timestamps
 
 ---
 
 ## Architecture
 
 ```
-.env
- └─ config.Load() ──────────────────────────────────► Config
-                                                         │
-data/users.json                                          │
- └─ LoadUsers()                                          │
-      └─ GenerateAllTokens() ──► []UserToken             │
-                                      │                  │
-                          ┌───────────┘                  │
-                          ▼                              ▼
-              PackSuite.SetupSuite()        SupplySuite.SetupSuite()
-                          │                              │
-          ┌───────────────┴────────────┐    testconfig.Load(config_supply.json)
-          ▼                            ▼
-    TestReveal               TestBuyAndReveal
-          │                            │
-  FetchUnrevealedPackIDs()     FetchPackInfo()
-          │                            │
-  worker pool (N goroutines)   per-user goroutine
-          │                            │
-    RevealPack()           BuyPack() → RevealPack()
-          │                            │
-   reporter.Report          reporter.BuyRevealReport
-          │                            │
-   reports/reveal_*.{json,html}  reports/buy_reveal_*.{json,html}
+.env ──► config.Load() ──► Config
+                               │
+data/users.json                │
+ └─ LoadUsers()                │
+      └─ GenerateAllTokens() ──► []UserToken (parallel)
+                                      │
+                    ┌─────────────────┤
+                    ▼                 ▼
+             PackSuite           SupplySuite
+          SetupSuite()          SetupSuite()
+          loads config_         loads config_
+          buy_reveal.json       supply.json
+                    │
+       ┌────────────┴────────────┐
+       ▼                         ▼
+  TestReveal              TestBuyAndReveal
+       │                         │
+  FetchUnrevealedPackIDs   FetchWallet (before)
+       │                         │
+  worker pool              FetchPackInfo (enriched)
+       │                         │
+  RevealPack()             BuyPack()
+       │                         │
+  reporter.Runner          FetchWallet (after)
+       │                         │
+  WriteReport()            RevealPack() ×N
+  StoreSuiteReport()       reporter.Runner
+                           WriteReport()
+                           StoreSuiteReport()
 
-              TestSupplyIntegrity
-                      │
-           FetchEventGroups()  (Spinner BFF)
-                      │
-           FetchSupplyBreakdowns()  (Proxy)
-                      │
-             assert Total() <= MaxSupply
-                      │
-           reporter.SupplyReport
-                      │
-           reports/supply_*.{json,html}
+TearDownSuite() ──► reporter.WriteRunHTML() ──► run_<ts>.html
 ```
 
 ### Key Design Decisions
 
 | Decision | Rationale |
 |---|---|
-| Auth runs once in `SetupSuite` | Tokens are shared across all tests in a suite — no redundant logins |
-| `testconfig.Load()` for payloads | Change request params by editing JSON, no recompile or commit needed |
-| Worker pool for reveals | Limits concurrency without spawning one goroutine per pack |
-| Per-user goroutines for buy+reveal | Each user's buy+reveal is independent; inner parallelism handles multiple packs |
-| `SupplyBreakdown.Total()` method | Single source of truth for the invariant being tested |
-| `tolerancePercent` in supply config | Allows tuning strictness per environment without code change |
+| `testutil.BaseSuite` as shared package | Suites in subdirectories can import it — not limited to one flat package |
+| JSON config files per test domain | Change params without touching code or committing |
+| Generic `Runner[R Row]` | Adding a new test only requires defining a struct — all reporting is automatic |
+| Wallet check before buy | Prevents wasting API calls on users who will fail finance validation |
+| `SOURCE: WEB` header on enriched API | Required by backend to return correct priceConfig per pack |
+| `SupplyBreakdown.Total()` method | Single source of truth for the supply invariant |
+| Combined `run_<ts>.html` | One file per run regardless of how many tests ran — easy to share |
 
 ---
 
 ## Adding a New Test
 
-1. Create `tests/<domain>_test.go`
-2. Define a suite embedding `BaseSuite`:
-   ```go
-   type MyDomainSuite struct {
-       BaseSuite
-   }
-   func TestMyDomainSuite(t *testing.T) { RunSuite(t, new(MyDomainSuite)) }
-   ```
-3. Override `SetupSuite` if you need domain-specific setup (call `s.BaseSuite.SetupSuite()` first)
-4. Add `Test*` methods for each test case
-5. If the test needs a configurable payload: add `data/config_<domain>.json` and load it via `testconfig.Load()`
-6. Add a new report type to `reporter/reporter.go` if the output shape differs from existing reporters
+### 1. Create the directory
 
-Run with:
 ```bash
-go test ./tests/... -v -run TestMyDomainSuite
+mkdir tests/wallet
 ```
+
+### 2. Create the test file
+
+```go
+// tests/wallet/wallet_test.go
+package wallet_test
+
+import (
+    "testing"
+    "time"
+    "fmt"
+
+    "github.com/AvinGupta27/code-go-automation/config"
+    "github.com/AvinGupta27/code-go-automation/reporter"
+    "github.com/AvinGupta27/code-go-automation/testutil"
+)
+
+// Row type — implement all 5 methods
+type walletRow struct { /* your fields */ }
+func (r walletRow) RowStatus()  reporter.Status        { /* ... */ }
+func (r walletRow) RowLatency() time.Duration          { /* ... */ }
+func (r walletRow) RowLabel()   string                 { /* ... */ }
+func (r walletRow) RowColumns() []reporter.Column      { /* ... */ }
+func (r walletRow) RowDetails() []reporter.Detail      { /* ... */ }
+
+// Suite
+type WalletSuite struct { testutil.BaseSuite }
+
+func TestWalletSuite(t *testing.T) { testutil.Run(t, new(WalletSuite)) }
+
+func (s *WalletSuite) TestWalletBalance() {
+    cfg := s.Cfg
+    run := reporter.NewRunner[walletRow]("Wallet Balance", reporter.NewMeta(
+        cfg.Env, cfg.FcBFFURL, "config_wallet.json", "wallet",
+    ))
+
+    // ... test logic ...
+
+    rep := run.Finish()
+    s.WriteReport(rep)
+    s.StoreSuiteReport(rep)
+    s.LogSummary(rep)
+}
+```
+
+### 3. Add a Makefile target
+
+```makefile
+## wallet: Check wallet balances for all users
+wallet:
+    go test ./tests/wallet/... -v -count=1
+```
+
+### 4. Add a runtime config (if needed)
+
+```json
+// data/config_wallet.json
+{
+  "currencyID": "GC12"
+}
+```
+
+That's the complete setup. `WriteReport`, `LogSummary`, `StoreSuiteReport`, config loading — all inherited from `BaseSuite`.
